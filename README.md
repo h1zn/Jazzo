@@ -18,6 +18,7 @@
   <a href="#android">Android</a> ·
   <a href="#network-mode">Network mode</a> ·
   <a href="#enhancements">Enhancements</a> ·
+  <a href="#make-it-yours">Make it yours</a> ·
   <a href="docs/MANUAL.md">Manual</a>
 </p>
 
@@ -165,6 +166,35 @@ What Jazzo adds to the original game:
 | Levels | Nine new levels with stars, secrets, score combos and bonus rooms |
 | Level packs | Packs load straight from `.zip` files and borrow missing tile sets from each other; broken maps are detected and hidden |
 | Tools | Scripts that check every level can be completed and every classic map loads |
+
+## Make it yours
+
+Jazzo is open source, so nothing in it is fixed: you can change any option
+and add anything to the game.
+
+**Change any option, in the game.** The **Options** menu covers video
+(resolution, upscaler, glow, scaling, screen shake and flashes), sound and
+music volume, every keyboard, gamepad and touch control, the language, and
+play settings such as Quick Change. Nothing needs editing by hand.
+
+**Change or add anything, in the code.** There is no build step: edit a file,
+refresh the browser, and the change is live.
+
+| To change or add | Look in |
+| --- | --- |
+| Physics and camera values | `src/config.js` |
+| Levels of your own | `src/levels/`, using the level builder in `src/level.js` |
+| Level packs | Drop a folder or `.zip` into `Levels/` and it appears in the episode select |
+| Enemies, pickups, springs and other objects | `src/entities.js` |
+| Weapons | `src/weapons.js` |
+| Bosses | `src/bosses.js` |
+| Party modes, rules and items | `src/party.js`, `src/partyitems.js` |
+| On-screen text and languages | `src/lang.js` |
+| Sprites and sounds | `assets/`, with the cutting scripts in `tools/` |
+| Music | `Soundtracks/` |
+
+The [manual](docs/MANUAL.md#project-layout) describes every file. Jazzo's code
+is under the MIT license, so you are free to modify it and share your version.
 
 ## Built with Rea
 
