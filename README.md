@@ -2,13 +2,15 @@
 
 <p align="center">
   <b>An open-source clone of Jazz Jackrabbit 2.</b><br>
-  Plays in the browser and on Android phones and tablets, with network games for up to five players.
+  Plays in the browser and on Android phones and tablets, with network games for up to five players.<br>
+  Built with <a href="#built-with-rea">Rea</a>.
 </p>
 
 <p align="center">
   <img alt="Platforms: Web and Android" src="https://img.shields.io/badge/platforms-web%20%7C%20android-2ea44f">
   <img alt="Version 1.7.1" src="https://img.shields.io/badge/version-1.7.1-blue">
   <img alt="Players: 1 to 5" src="https://img.shields.io/badge/players-1--5-orange">
+  <img alt="Built with Rea" src="https://img.shields.io/badge/built%20with-Rea-8a2be2">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
@@ -133,24 +135,35 @@ cd android
 
 ## Network mode
 
-Party mode puts up to five players in one game, on a local network or over the
-internet.
+Network play is built into the game: up to five players in one game, on a
+local network or over the internet, all set up from the **Party** item of the
+main menu.
+
+| In the Party menu | What it does |
+| --- | --- |
+| **Host a game** | Opens a room, gives you its 4-letter code, and lets you pick the mode, the level and the goal, and lock the room with a password |
+| **Join a game** | Lists the open games it finds on the network; pick one or type its room code |
+| **Same computer** | Split screen for two players |
 
 - **Four game types**: Treasure Hunt, Battle, Capture the Flag and Race.
 - **No addresses to type on Wi-Fi**: phones find hosts on the network by
-  themselves. Rooms have a 4-letter code and an optional password.
+  themselves.
 - **Any mix of devices**: computers join from a browser, phones from the app.
 - **Survives a dropped connection**: a guest who loses Wi-Fi keeps their place
   for a minute and rejoins with their gems, hearts and score.
-- **Split screen** for two players on the same computer.
 
-| To play | Start it with |
+**On Android** there is nothing else to do: the app has the party server
+inside it, so a phone can host straight from the menu.
+
+**On a computer**, the other players have to be able to reach your game, so
+start it in network mode before hosting from the menu:
+
+| To play | Start the game with |
 | --- | --- |
 | On your local network | `party.bat`, or `python serve.py 8870 --lan` |
 | Over the internet | `python serve.py --public` on a machine the players can reach |
 
-The other players open the address the host's lobby shows. The game server and
-the party relay are the same small program, with no dependencies.
+The other players open the address the host's lobby shows in their browser.
 
 ## Enhancements
 
@@ -198,8 +211,9 @@ is under the MIT license, so you are free to modify it and share your version.
 
 ## Built with Rea
 
-Jazzo was cloned using the **Rea** concept, on our **Rea Platform**. The Rea
-Platform is not public yet; we will publish it later.
+Jazzo is a Rea project: it was cloned using the **Rea** concept, on our
+**Rea Platform**. The Rea Platform is not public yet; we will publish it
+later.
 
 ## Game data
 
