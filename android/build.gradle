@@ -1,0 +1,5 @@
+// The Android build of Jazzo: the web game (../index.html, ../src,
+// ../assets, ../Levels, ...) packed into an app that shows it in a WebView.
+plugins {
+    id 'com.android.application' version '8.11.0' apply false
+}

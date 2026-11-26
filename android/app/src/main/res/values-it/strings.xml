@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="loading">Caricamento</string>
+    <string name="hosting_channel">Partita in corso</string>
+    <string name="hosting_title">Partita Jazzo in corso</string>
+    <plurals name="hosting_players">
+        <item quantity="one">In attesa di giocatori: tocca per tornare al gioco</item>
+        <item quantity="other">%d giocatori: tocca per tornare al gioco</item>
+    </plurals>
+</resources>

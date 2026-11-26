@@ -1,0 +1,21 @@
+# Build output and machine-local files
+tools/out/
+__pycache__/
+*.apk
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.iml
+.idea/
+
+# Original Jazz Jackrabbit 2 game data and third-party level packs.
+# They are not part of this repository: supply your own copy (see README).
+assets/**
+!assets/**/
+!assets/**/*.json
+Levels/*
+!Levels/maps.json
+Soundtracks/
+android/app/src/main/res/drawable-xxxhdpi/ic_launcher_foreground.png
+android/app/src/main/res/drawable-xxxhdpi/ic_launcher_monochrome.png

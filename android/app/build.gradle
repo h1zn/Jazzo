@@ -1,0 +1,158 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.util.zip.ZipFile
+import javax.inject.Inject
+
+plugins {
+    id 'com.android.application'
+}
+
+// The web game lives one folder up (the same files serve.py serves on Windows).
+def webRoot = rootProject.projectDir.parentFile
+
+android {
+    namespace 'com.realabs.kipsgemrush'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.realabs.kipsgemrush'
+        minSdk 26
+        targetSdk 36
+        versionCode 11
+        versionName '1.7.1'
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+            // A test build: signed with the debug key so it installs straight
+            // away. Sign with your own key before giving it to anyone else.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    androidResources {
+        // Already compressed (or streamed): store them as they are.
+        noCompress += ['zip', 'ZIP', 'mp3', 'ogg', 'png', 'j2l', 'j2t', 'j2b', 'j2v']
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+// ---------------------------------------------------------------- web assets
+
+// Copies the web game into the app's assets (www/) and writes www/levels.json,
+// the list of level packs serve.py makes on the fly for /levels.json.
+abstract class SyncWebAssets extends DefaultTask {
+    @Internal
+    abstract DirectoryProperty getWebRoot()
+
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract ConfigurableFileCollection getSources()
+
+    @OutputDirectory
+    abstract DirectoryProperty getOutputDir()
+
+    @Inject
+    abstract FileSystemOperations getFs()
+
+    static final List<String> MUSIC = ['.j2b', '.it', '.mod', '.s3m', '.xm', '.ogg', '.mp3', '.mo3']
+    static final List<String> LIBRARY = MUSIC + ['.j2v']
+
+    @TaskAction
+    void run() {
+        File root = webRoot.get().asFile
+        File out = new File(outputDir.get().asFile, 'www')
+        // Pack files with no playable map left (Levels/maps.json, written by
+        // tools/check_maps.mjs) stay out of the app.
+        List<String> skip = skipped(new File(root, 'Levels/maps.json'))
+        fs.sync { spec ->
+            spec.from(root) { c ->
+                c.include 'index.html', 'style.css', 'src/**', 'assets/**', 'vendor/**', 'Levels/**', 'Soundtracks/**'
+                skip.each { name -> c.exclude "Levels/${name}", "Levels/${name}/**" }
+            }
+            spec.into(out)
+        }
+        new File(out, 'levels.json').setText(JsonOutput.toJson(packs(new File(root, 'Levels'), skip)), 'UTF-8')
+    }
+
+    static List<String> skipped(File maps) {
+        if (!maps.isFile()) return []
+        try {
+            def list = new JsonSlurper().parse(maps).skip
+            return list instanceof List ? list.findAll { it instanceof String && it && !it.contains('/') && !it.contains(File.separator) && !it.contains('..') } : []
+        } catch (Exception ignored) {
+            return []
+        }
+    }
+
+    // The same listing as serve.py's level_list().
+    static List<Map> packs(File levels, List<String> skip = []) {
+        List<Map> packs = []
+        if (!levels.isDirectory()) return packs
+        def names = (levels.list() as List<String>).findAll { !skip.contains(it) }.sort()
+        for (String name : names) {
+            File entry = new File(levels, name)
+            List<String> files
+            String kind
+            if (name.toLowerCase().endsWith('.zip') && entry.isFile()) {
+                try {
+                    ZipFile z = new ZipFile(entry)
+                    try {
+                        files = z.entries().collect { it.name.split('/').last() }.findAll { it }.unique().sort()
+                    } finally {
+                        z.close()
+                    }
+                } catch (IOException ignored) {
+                    continue
+                }
+                kind = 'zip'
+            } else if (entry.isDirectory()) {
+                files = (entry.list() as List<String>).sort()
+                kind = 'dir'
+            } else {
+                continue
+            }
+            def levelFiles = files.findAll { it.toLowerCase().endsWith('.j2l') && !it.toLowerCase().contains('-mlle-data-') }
+            def tilesets = files.findAll { it.toLowerCase().endsWith('.j2t') }
+            if (levelFiles) {
+                packs << [(kind): name, levels: levelFiles, files: files, tilesets: tilesets]
+            } else if (tilesets || files.any { f -> LIBRARY.any { f.toLowerCase().endsWith(it) } }) {
+                packs << [(kind): name, library: true, levels: [], files: files, tilesets: tilesets]
+            }
+        }
+        return packs
+    }
+}
+
+def syncWebAssets = tasks.register('syncWebAssets', SyncWebAssets) {
+    it.webRoot.set(webRoot)
+    it.sources.from(
+            new File(webRoot, 'index.html'), new File(webRoot, 'style.css'),
+            new File(webRoot, 'src'), new File(webRoot, 'assets'), new File(webRoot, 'vendor'),
+            new File(webRoot, 'Levels'), new File(webRoot, 'Soundtracks'))
+    it.outputDir.set(layout.buildDirectory.dir('generated/webAssets'))
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets.addGeneratedSourceDirectory(syncWebAssets, { it.outputDir })
+    }
+}

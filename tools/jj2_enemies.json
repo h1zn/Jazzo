@@ -1,0 +1,204 @@
+{
+  "anims": {
+    "sparks": {
+      "j2a": "Sparks/idle"
+    },
+    "caterpillar": {
+      "j2a": "Caterpillar/idle"
+    },
+    "caterpillarExhale": {
+      "j2a": "Caterpillar/exhale"
+    },
+    "caterpillarSmoke": {
+      "j2a": "Caterpillar/smoke"
+    },
+    "sucker": {
+      "j2a": "Sucker/walk"
+    },
+    "suckerFloat": {
+      "j2a": "Sucker/inflated"
+    },
+    "witch": {
+      "j2a": "Witch/idle"
+    },
+    "witchAttack": {
+      "j2a": "Witch/attack"
+    },
+    "witchMagic": {
+      "j2a": "Witch/bullet_magic"
+    },
+    "lizardFloat": {
+      "j2a": "Lizard/copter_idle"
+    },
+    "lizardCopter": {
+      "j2a": "Lizard/copter"
+    },
+    "lizardCopterXmas": {
+      "j2a": "Lizard/xmas_copter"
+    },
+    "helmut": {
+      "j2a": "Helmut/walk"
+    },
+    "rapier": {
+      "j2a": "Rapier/idle"
+    },
+    "dragon": {
+      "j2a": "Dragon/idle"
+    },
+    "dragonAttack": {
+      "j2a": "Dragon/attack"
+    },
+    "beeBoy": {
+      "j2a": "Bee/bee"
+    },
+    "tufTurt": {
+      "j2a": "TurtleTough/walk"
+    },
+    "turtleTube": {
+      "j2a": "TurtleTube/idle"
+    },
+    "bubba": {
+      "j2a": "Bubba/hop"
+    },
+    "bubbaFire": {
+      "j2a": "Bubba/spew_fireball"
+    },
+    "bubbaFireball": {
+      "j2a": "Bubba/fireball"
+    },
+    "bubbaTornado": {
+      "j2a": "Bubba/tornado"
+    },
+    "tweedle": {
+      "j2a": "Tweedle/walk"
+    },
+    "tweedleSpin": {
+      "j2a": "Tweedle/spin"
+    },
+    "turtleRocket": {
+      "j2a": "TurtleRocket/downright"
+    },
+    "bolly": {
+      "j2a": "Bolly/bottom"
+    },
+    "bollyTop": {
+      "j2a": "Bolly/top"
+    },
+    "bollyRocket": {
+      "j2a": "Bolly/rocket"
+    },
+    "ghost": {
+      "j2a": "Sparks/ghost_idle"
+    },
+    "turtleRocketUp": {
+      "j2a": "TurtleRocket/upright"
+    },
+    "bubbaJump": {
+      "j2a": "Bubba/jump"
+    },
+    "bubbaFall": {
+      "j2a": "Bubba/jump_fall"
+    },
+    "devanTransform": {
+      "j2a": "Devan/demon_transform_start",
+      "speed": 2,
+      "loop": false
+    },
+    "devanTransformEnd": {
+      "j2a": "Devan/demon_transform_end",
+      "speed": 3,
+      "loop": false
+    },
+    "devanDemon": {
+      "j2a": "Devan/demon_fly"
+    },
+    "devanSpew": {
+      "j2a": "Devan/demon_spew_fireball",
+      "loop": false
+    },
+    "devanFireball": {
+      "j2a": "Devan/demon_fireball"
+    },
+    "bollyTurret": {
+      "j2a": "Bolly/turret"
+    },
+    "caterpillarInhale": {
+      "j2a": "Caterpillar/inhale"
+    },
+    "tweedleIdle": {
+      "j2a": "Tweedle/idle"
+    },
+    "tweedleMagnetStart": {
+      "j2a": "Tweedle/magnet_start"
+    },
+    "tweedleMagnet": {
+      "j2a": "Tweedle/magnet"
+    },
+    "tweedleMagnetEnd": {
+      "j2a": "Tweedle/magnet_end"
+    },
+    "tweedleShootJazz": {
+      "j2a": "Tweedle/shoot_jazz"
+    },
+    "tweedleShootSpaz": {
+      "j2a": "Tweedle/shoot_spaz"
+    },
+    "tweedleHurt": {
+      "j2a": "Tweedle/hurt"
+    },
+    "turtleXmas": {
+      "j2a": "Turtle/xmas_walk"
+    },
+    "turtleXmasShell": {
+      "j2a": "Turtle/xmas_shell"
+    },
+    "lizardXmas": {
+      "j2a": "Lizard/xmas_walk"
+    },
+    "lizardFloatXmas": {
+      "j2a": "Lizard/xmas_copter_idle"
+    },
+    "bilsyXmasIdle": {
+      "j2a": "Bilsy/xmas_idle"
+    },
+    "bilsyXmasThrow": {
+      "j2a": "Bilsy/xmas_throw_fireball"
+    },
+    "bilsyXmasAppear": {
+      "j2a": "Bilsy/xmas_appear"
+    },
+    "bilsyXmasVanish": {
+      "j2a": "Bilsy/xmas_vanish"
+    },
+    "bilsyXmasFireball": {
+      "j2a": "Bilsy/xmas_bullet_fireball"
+    },
+    "bumper500": {
+      "j2a": "Pinball/bumper_500"
+    },
+    "bumper500Hit": {
+      "j2a": "Pinball/bumper_500_hit"
+    },
+    "bumperCarrot": {
+      "j2a": "Pinball/bumper_carrot"
+    },
+    "bumperCarrotHit": {
+      "j2a": "Pinball/bumper_carrot_hit"
+    },
+    "paddle": {
+      "j2a": "Pinball/paddle_left"
+    },
+    "steamNote": {
+      "j2a": "Common/steam_note"
+    },
+    "butterfly": {
+      "j2a": "Unimplemented/butterfly"
+    },
+    "cheshirePlatform": {
+      "j2a": "Cheshire/platform_idle"
+    },
+    "cheshireHook": {
+      "j2a": "Cheshire/hook_idle"
+    }
+  }
+}

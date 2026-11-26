@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="loading">Lädt</string>
+    <string name="hosting_channel">Spiel wird gehostet</string>
+    <string name="hosting_title">Jazzo-Spiel wird gehostet</string>
+    <plurals name="hosting_players">
+        <item quantity="one">Wartet auf Mitspieler – tippen, um zum Spiel zurückzukehren</item>
+        <item quantity="other">%d Spieler – tippen, um zum Spiel zurückzukehren</item>
+    </plurals>
+</resources>

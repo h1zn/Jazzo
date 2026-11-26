@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0716">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Jazzo</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="game" width="640" height="360" aria-label="Jazzo game canvas"></canvas>
+  <!-- Up from the first moment, while the game's code and pictures load
+       (src/main.js takes it down with its first frame). -->
+  <div id="loading" role="status" aria-live="polite">
+    <div class="l-name">JAZZO</div>
+    <div class="l-bar"><i id="loading-bar"></i></div>
+    <div class="l-word" id="loading-word">Loading</div>
+  </div>
+  <script>
+    // The loading screen: a bar the game fills as its pictures arrive
+    // (window.kipLoading(0..1)), gone when the game is up (window.kipLoaded()).
+    // If the game fails to start, it says so rather than loading for ever.
+    (function () {
+      var box = document.getElementById('loading');
+      var bar = document.getElementById('loading-bar');
+      var word = document.getElementById('loading-word');
+      var WORDS = {
+        en: ['Loading', 'The game could not start. Close it and open it again.'],
+        de: ['Lädt', 'Das Spiel konnte nicht starten. Schließe es und öffne es erneut.'],
+        fr: ['Chargement', "Le jeu n'a pas pu démarrer. Ferme-le et rouvre-le."],
+        es: ['Cargando', 'El juego no pudo iniciarse. Ciérralo y ábrelo de nuevo.'],
+        it: ['Caricamento', 'Il gioco non è riuscito a partire. Chiudilo e riaprilo.'],
+        nl: ['Laden', 'Het spel kon niet starten. Sluit het en open het opnieuw.']
+      };
+      var words = WORDS.en;
+      try {
+        // In the language the game was last played in.
+        var saved = JSON.parse(localStorage.getItem('gemrush.save.v1'));
+        if (saved && saved.options && WORDS[saved.options.lang]) words = WORDS[saved.options.lang];
+      } catch (e) { /* no saved game: English */ }
+      word.textContent = words[0];
+      var up = true;
+      var broken = false;
+      var shown = 0;
+      window.kipLoading = function (part) {
+        if (!up || broken) return;
+        shown = Math.max(shown, Math.min(1, part));      // it never goes back
+        box.className = 'l-known';
+        bar.style.width = Math.round(shown * 100) + '%';
+      };
+      window.kipLoaded = function () {
+        if (!up) return;
+        up = false;
+        bar.style.width = '100%';
+        box.className = 'l-known l-done';
+        setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 400);
+      };
+      var failed = function () {
+        if (!up) return;
+        broken = true;          // (should the game come up after all, kipLoaded still takes this down)
+        box.className = 'l-failed';
+        word.textContent = words[1];
+      };
+      // The game's code or a picture it needs did not load.
+      window.addEventListener('error', failed);
+      window.addEventListener('unhandledrejection', failed);
+      window.kipLoadFailed = failed;
+    })();
+  </script>
+  <script>
+    // A browser too old for the game (on a phone: an out-of-date Android
+    // System WebView) would only show a black screen: say what to do instead.
+    (function () {
+      var ok = false;
+      try {
+        ok = 'noModule' in HTMLScriptElement.prototype && 'roundRect' in CanvasRenderingContext2D.prototype
+          && typeof Promise.allSettled === 'function' && typeof WebSocket === 'function';
+      } catch (e) { ok = false; }
+      if (ok) return;
+      var note = document.createElement('div');
+      note.setAttribute('role', 'alert');
+      note.style.cssText = 'position:fixed;inset:0;z-index:99;display:flex;align-items:center;justify-content:center;padding:24px;'
+        + 'box-sizing:border-box;background:#0b0716;color:#fff6c0;font:16px/1.5 system-ui,sans-serif;text-align:center';
+      note.textContent = 'Jazzo needs a newer browser. On Android, update "Android System WebView" and Chrome in the Play Store, then open the game again.';
+      document.body.appendChild(note);
+    })();
+  </script>
+  <script type="module" src="src/main.js" onerror="window.kipLoadFailed && window.kipLoadFailed()"></script>
+</body>
+</html>

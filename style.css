@@ -1,0 +1,269 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #0b0716;
+  overflow: hidden;
+  /* Touch screens: no scrolling, zooming, text selection or long-press menus. */
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: fixed;
+  inset: 0;
+}
+
+#game, #gpu {
+  touch-action: none;
+}
+
+#game {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #000;
+  /* Keep 16:9 and fit the window, scaling the 640x360 canvas up crisply. */
+  width: min(100vw, calc(100vh * 16 / 9));
+  height: min(100vh, calc(100vw * 9 / 16));
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ loading screen (index.html) */
+
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(10px, 3vh, 22px);
+  padding: 24px;
+  box-sizing: border-box;
+  background: radial-gradient(ellipse at 50% 42%, #24104e 0%, #0b0716 70%);
+  color: #c8b8e8;
+  font-family: "Arial Black", Impact, system-ui, sans-serif;
+  text-align: center;
+  transition: opacity 0.35s ease;
+}
+#loading.l-done { opacity: 0; pointer-events: none; }
+.l-name {
+  font-size: clamp(40px, 14vh, 96px);
+  font-weight: 900;       /* (a phone has no Arial Black: its own font, at its heaviest) */
+  line-height: 1;
+  letter-spacing: 0.06em;
+  color: #ffd54a;
+  background: linear-gradient(#fff6c0 12%, #ffb02e 88%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0.05em 0 #1a0b1e) drop-shadow(0 0 0.35em rgba(255, 176, 46, 0.35));
+}
+.l-bar {
+  position: relative;
+  width: min(60vw, 340px);
+  height: 12px;
+  border-radius: 7px;
+  border: 2px solid rgba(255, 214, 90, 0.85);
+  background: rgba(12, 6, 30, 0.9);
+  overflow: hidden;
+}
+.l-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 12%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #ff7ac0, #ffd54a);
+  /* The first eighth is the game's code arriving, which nothing can
+     measure: it creeps up by itself, and the pictures take it from there
+     (src/main.js starts them at 12%, so the bar never steps back). */
+  animation: l-creep 4s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+#loading.l-known .l-bar i { animation: none; transition: width 0.18s ease-out; }
+#loading.l-failed .l-bar { display: none; }
+#loading.l-failed .l-word { color: #ffb0b8; font-family: system-ui, sans-serif; font-size: 16px; font-weight: 400; letter-spacing: 0; text-transform: none; max-width: 30em; line-height: 1.5; }
+.l-word { font-size: 13px; font-weight: 900; letter-spacing: 0.18em; text-transform: uppercase; }
+@keyframes l-creep { from { width: 1%; } to { width: 12%; } }
+@media (prefers-reduced-motion: reduce) {
+  #loading { transition: none; }
+  .l-bar i, #loading.l-known .l-bar i { animation: none; transition: none; }
+}
+
+/* ------------------------------------------------------------------ touch controls (src/touch.js) */
+
+#touch {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  font-family: "Arial Black", Impact, system-ui, sans-serif;
+  --t-alpha: 0.6;
+  --t-gold: #ffd54a;
+  --t-ink: #0c061e;
+}
+#touch.t-on { opacity: 1; }
+
+.t-probe {
+  position: absolute;
+  visibility: hidden;
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+.t-el {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+#touch.t-playing .t-play { opacity: var(--t-alpha); }
+#touch.t-playing .t-play.t-tap { pointer-events: auto; }
+#touch.t-playing .t-runbtn { display: none; }
+#touch.t-playing.t-run .t-runbtn { display: flex; }
+#touch.t-pause .t-pausebtn, #touch.t-back .t-backbtn { opacity: calc(var(--t-alpha) * 0.9 + 0.1); pointer-events: auto; }
+
+.t-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: radial-gradient(circle at 32% 26%, rgba(150, 118, 232, 0.62), rgba(34, 18, 78, 0.78) 62%, rgba(12, 6, 30, 0.86));
+  border: 0.13em solid rgba(255, 255, 255, 0.82);
+  box-shadow: 0 0 0 0.05em rgba(12, 6, 30, 0.7), 0 0.12em 0.3em rgba(0, 0, 0, 0.45), inset 0 0 0.5em rgba(255, 255, 255, 0.14);
+  transition: opacity 0.16s ease, transform 0.07s ease, background 0.07s ease, border-color 0.07s ease;
+  cursor: pointer;
+}
+.t-btn svg { width: 0.92em; height: 0.92em; display: block; filter: drop-shadow(0 0.05em 0.04em rgba(0, 0, 0, 0.6)); }
+.t-btn span { font-size: 0.27em; line-height: 1; letter-spacing: 0.06em; margin-top: 0.1em; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+.t-btn span:empty { display: none; }
+.t-jump { border-color: var(--t-gold); color: #fff6c0; }
+.t-fire { border-color: #ff8fa8; color: #ffe0e8; }
+.t-weapon svg, .t-pausebtn svg, .t-backbtn svg { width: 1.15em; height: 1.15em; }
+.t-btn.t-down, .t-btn.t-lit {
+  transform: scale(0.93);
+  background: radial-gradient(circle at 50% 45%, rgba(255, 232, 150, 0.95), rgba(255, 176, 46, 0.9) 70%);
+  border-color: #fff;
+  color: var(--t-ink);
+}
+.t-btn.t-lit { transform: none; }
+.t-btn.t-down svg, .t-btn.t-lit svg { filter: none; }
+.t-btn.t-down span, .t-btn.t-lit span { text-shadow: none; }
+
+/* The stick: a ring that comes to the thumb, and its knob. */
+.t-stick {
+  background: radial-gradient(circle, rgba(34, 18, 78, 0.5) 0%, rgba(34, 18, 78, 0.34) 62%, rgba(12, 6, 30, 0.6) 100%);
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  box-shadow: inset 0 0 18px rgba(255, 255, 255, 0.08);
+}
+.t-stick.t-live { border-color: rgba(255, 255, 255, 0.85); }
+.t-stick.t-far { border-color: var(--t-gold); box-shadow: 0 0 14px rgba(255, 213, 74, 0.55), inset 0 0 18px rgba(255, 213, 74, 0.18); }
+.t-knob {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.95), rgba(190, 168, 255, 0.9) 45%, rgba(104, 76, 190, 0.92));
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  will-change: transform;
+}
+.t-stick.t-far .t-knob { background: radial-gradient(circle at 34% 28%, #fff, #ffe38a 45%, #ffb02e); }
+.t-arrow { position: absolute; width: 0; height: 0; border: 5px solid transparent; opacity: 0.55; }
+.t-arrow.t-l { left: 5px; top: 50%; margin-top: -5px; border-right-color: #fff; border-left-width: 0; }
+.t-arrow.t-r { right: 5px; top: 50%; margin-top: -5px; border-left-color: #fff; border-right-width: 0; }
+.t-arrow.t-u { top: 5px; left: 50%; margin-left: -5px; border-bottom-color: #fff; border-top-width: 0; }
+.t-arrow.t-d { bottom: 5px; left: 50%; margin-left: -5px; border-top-color: #fff; border-bottom-width: 0; }
+
+/* Typing: the bar the on-screen keyboard attaches to. */
+.t-type {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(88vw, 460px);
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  margin: 0;
+  box-sizing: border-box;
+  background: rgba(12, 6, 30, 0.94);
+  border: 2px solid var(--t-gold);
+  border-radius: 14px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.6);
+  pointer-events: auto;
+}
+#touch.t-typing .t-type { display: flex; }
+.t-type-field {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 9px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff6c0;
+  caret-color: var(--t-gold);
+  font: 700 20px/44px "Arial Black", Impact, system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: manipulation;
+}
+.t-type-field.t-plain { text-transform: none; letter-spacing: 0.02em; font-weight: 400; font-family: system-ui, sans-serif; }
+.t-type-field:focus { background: rgba(255, 255, 255, 0.16); }
+.t-type-btn {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.t-type-btn svg { width: 24px; height: 24px; }
+.t-type-ok { background: var(--t-gold); color: var(--t-ink); }
+.t-type-btn:active { transform: scale(0.94); }
+
+/* A phone held upright, in a browser: ask for it sideways. */
+.t-rotate {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: rgba(11, 7, 22, 0.94);
+  color: #fff6c0;
+  font-size: 18px;
+  text-align: center;
+}
+.t-rotate svg { width: 72px; height: 72px; color: var(--t-gold); }
+@media (orientation: portrait) and (max-width: 700px) {
+  #touch.t-on.t-web .t-rotate { display: flex; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #touch, .t-el, .t-btn { transition: none; }
+}

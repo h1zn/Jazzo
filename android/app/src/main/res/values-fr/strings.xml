@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="loading">Chargement</string>
+    <string name="hosting_channel">Partie hébergée</string>
+    <string name="hosting_title">Partie Jazzo hébergée</string>
+    <plurals name="hosting_players">
+        <item quantity="one">En attente de joueurs – touche pour revenir au jeu</item>
+        <item quantity="other">%d joueurs – touche pour revenir au jeu</item>
+    </plurals>
+</resources>

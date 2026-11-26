@@ -1,0 +1,14 @@
+{
+  "about": "Maps left out of the menus on purpose (desktop and Android alike). Keys are level keys (jj2:<pack>:<number>) or a whole pack (jj2:<pack>:*); the value says why. Delete a line to bring a map back.",
+  "hidden": {
+    "jj2:bl18:*": "BL18 is built on JJ2+ scripts (drawn layers, textured backgrounds, scripted objects) this game can't run: Forlorn Planet Ex comes out as a jumble of tiles.",
+    "jj2:rob:8": "The Zerox Factory: a front layer of black tiles hides the whole play field."
+  },
+  "found": {
+    "jj2:threed:0": "Threed Realms: It needs JJ2+ scripts that draw and move its layers, which this game cannot run"
+  },
+  "skip": [
+    "BL18.zip",
+    "ThreedRealms v3"
+  ]
+}

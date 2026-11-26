@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Jazzo</string>
+    <!-- On the loading screen the app shows while the game's page starts (LoadingView). -->
+    <string name="loading">Loading</string>
+    <!-- The notice in the shade while this phone hosts a party with the app put away (HostService). -->
+    <string name="hosting_channel">Hosting a game</string>
+    <string name="hosting_title">Hosting a Jazzo game</string>
+    <plurals name="hosting_players">
+        <item quantity="one">Waiting for players – tap to go back to the game</item>
+        <item quantity="other">%d players – tap to go back to the game</item>
+    </plurals>
+</resources>

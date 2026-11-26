@@ -1,0 +1,1381 @@
+// Party mode for up to five players: on one network or the internet over the
+// serve.py relay (WebSocket at /ws), or two on one computer (split screen).
+//
+// Game types (the manual's), picked by the host:
+//   Treasure Hunt  collect the goal in gems (red 1, green 3, purple 5, gold
+//                  10), then find the exit. Taken gems come back after a while.
+//   Battle         first to the goal in roasts (knock-outs of other players).
+//   Race           first to finish the goal in laps.
+//   Capture the Flag  two teams (blue: players 1, 3, 5; red: 2, 4): take the
+//                  other team's flag home while your own is there.
+// Every player has five hearts; a hit costs one (and in a treasure hunt knocks
+// out some of the gems they really hold, worth up to five). With none left you're knocked out for 5 s and
+// come back, keeping your gems, at a spot away from the others, safe from
+// harm for 3 s. For the first two minutes (the host can change this) nobody
+// can hurt anybody.
+//
+// Sync: each side simulates its own player and sends its state 20 times a
+// second; the others are drawn smoothly between updates. The host owns the
+// pickups (the others ask before collecting, and the host brings collected
+// ones back), and each side decides hits on its own player, so nobody can be
+// hit unfairly.
+//
+// A guest whose connection drops (Wi-Fi out of range, the app put away) is
+// not out: the relay keeps their place for a minute and what they miss, and
+// their game goes back in by itself (Net). Meanwhile they stand still, safe
+// from harm, and the others see them faded, out of the fight.
+
+import { PLAYER, TILE, VIEW_H } from './config.js';
+import { overlap, Pickup } from './entities.js';
+import { tr } from './lang.js';
+import { Items, placeBoxes } from './partyitems.js';
+import { Bullet, TNT } from './weapons.js';
+
+export const MAX_PLAYERS = 5;
+export const PARTY_GOAL = 100;
+// Out for 5 s: long enough to cost something, short enough that nobody
+// sits watching (it was 10 s, a long wait with two players).
+export const PARTY_RESPAWN = 350;   // ticks (5 s)
+const RESPAWN_SAFE = 210;           // ticks back in play before anything can hurt (3 s)
+export const PARTY_DROP = 5;        // most gem value a hit drops
+export const PARTY_HEARTS = PLAYER.maxHealth;
+export const SECOND = 1000 / 14;    // ticks per second
+const GEM_BACK = 45 * SECOND;       // a collected pickup comes back after this
+const BOARD_TIME = Math.round(30 * SECOND);    // an airboard ride lasts this long
+const ARMOR_TIME = Math.round(10 * SECOND);    // treasure armor: no harm for this long
+const ARMOR_BACK = Math.round(120 * SECOND);    // ...and the next one shows up this much later
+const EXIT_CLEAR = 18;              // tiles: nobody (re)spawns this close to the exit
+const GEM_COLOR = { 1: 'red', 3: 'green', 5: 'purple', 10: 'gold' };
+// Someone near but out of sight: this far past the edge of the screen (px)
+// the warning starts, and a rival's shots are heard from a little further.
+const LURK_RANGE = 380;
+const SHOT_RANGE = 460;
+
+// Who plays as whom: join order picks the hero. Players 4 and 5 are Jazz and
+// Spaz in other colours. `color` marks the player on the HUD and name tags.
+export const SLOTS = [
+  null,
+  { character: 'jazz', tint: null, color: '#5ae08a' },
+  { character: 'spaz', tint: null, color: '#ff7a5a' },
+  { character: 'lori', tint: null, color: '#ffd54a' },
+  { character: 'jazz', tint: 'purple', color: '#c48aff' },
+  { character: 'spaz', tint: 'blue', color: '#6ab8ff' },
+];
+
+export const TEAMS = [{ name: 'BLUE', color: '#4a9aff' }, { name: 'RED', color: '#ff4a4a' }];
+export const teamOf = (id) => (id % 2 ? 0 : 1);
+
+// Each game type's goal choices (the first is the default) and the HUD word.
+export const MODE_INFO = {
+  treasure: { name: 'TREASURE HUNT', goals: [100, 150, 200, 50], unit: 'GEMS' },
+  battle: { name: 'BATTLE', goals: [10, 15, 20, 5], unit: 'ROASTS' },
+  race: { name: 'RACE', goals: [3, 5, 10, 1], unit: 'LAPS' },
+  ctf: { name: 'CAPTURE THE FLAG', goals: [5, 3, 10, 1], unit: 'FLAGS' },
+};
+export const TRUCES = [120, 0, 60, 180];   // seconds without fighting (first: default)
+
+// Built-in levels that make good treasure and battle grounds.
+const OWN_PARTY_LEVELS = [0, 2, 5, 6];
+
+// The levels a game type can be played on: ours and the JJ2 ones whose
+// pack lists it (src/jj2/catalog.js).
+export function partyLevels(mode, jj2) {
+  const own = mode === 'treasure' || mode === 'battle' ? OWN_PARTY_LEVELS : [];
+  return [...jj2.filter((d) => d.modes.includes(mode)).map((d) => d.key), ...own];
+}
+
+// A guest who loses the connection in a game in play keeps trying to get
+// back for this long (the relay holds their place for a minute), and this
+// long without a word from the relay means the connection is dead.
+const REJOIN_MS = 55000;
+const SILENT_MS = 7000;
+// What a player who was away still needs to hear about when they are back
+// (the relay keeps it for them): who took what, what was dropped or broken,
+// the scores. The rest (where everyone was, shots, zaps) is long over.
+const LATE_OK = new Set(['got', 'back', 'drop', 'board', 'tile', 'ko', 'flag', 'cap', 'win', 'left', 'deny', 'away', 'returned', 'trap', 'untrap']);
+
+// The relay connection. Messages are queued and handled on the game tick.
+// A guest whose connection drops during a game goes back in by itself: the
+// relay gave it a key for its place when it joined (see serve.py).
+export class Net {
+  // `url`: the relay's address (the Android app); else this page's server.
+  constructor(url = null) {
+    this.url = url;
+    this.ws = null;
+    this.inbox = [];
+    this.status = 'idle';     // idle | connecting | open | lost (getting back in) | closed | error
+    this.error = null;
+    this.room = null;         // the way back in: the room, our place in it, and the key to it
+    this.slot = 0;
+    this.key = null;
+    this.playing = false;     // a game is on (the lobby has no way back, and needs none)
+    this.heardAt = 0;         // when the relay was last heard from
+    this.beatAt = 0;
+    this.beatTimer = null;
+    this.retryTimer = null;
+    this.trying = null;       // the connection a rejoin is being tried on
+    this.lostAt = 0;
+  }
+
+  address() { return this.url || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`; }
+
+  connect() {
+    return new Promise((resolve) => {
+      this.status = 'connecting';
+      let ws;
+      try {
+        ws = this.ws = new WebSocket(this.address());
+      } catch (e) {
+        this.status = 'error'; this.error = 'Could not reach the party server.'; resolve(false); return;
+      }
+      // An address nobody answers at can hang for a minute: give up sooner.
+      const timer = setTimeout(() => {
+        if (this.status !== 'connecting' || this.ws !== ws) return;
+        this.status = 'error'; this.error = 'Could not reach the party server.';
+        try { ws.close(); } catch (e) { /* closing */ }
+        resolve(false);
+      }, 8000);
+      ws.onopen = () => { clearTimeout(timer); if (this.ws !== ws) { resolve(false); return; } this.status = 'open'; this.wire(ws); resolve(true); };
+      ws.onerror = () => { clearTimeout(timer); if (this.status === 'error' || this.ws !== ws) { resolve(false); return; } this.status = 'error'; this.error = 'Could not reach the party server. Start the game with party.bat (serve.py --lan).'; resolve(false); };
+      ws.onclose = () => { if (this.ws === ws && this.status === 'connecting') this.status = 'closed'; };
+    });
+  }
+
+  // An open connection: what comes in goes to the inbox.
+  wire(ws) {
+    this.heard();
+    ws.onerror = () => {};
+    ws.onmessage = (e) => {
+      if (this.ws !== ws) return;
+      this.heard();
+      let m;
+      try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.t === 'pong') return;
+      // Our place in the room, and the key back into it.
+      if (m.t === 'joined' && m.key) { this.room = m.code; this.slot = m.id; this.key = m.key; this.startBeat(); }
+      this.inbox.push(m);
+    };
+    ws.onclose = () => {
+      if (this.ws !== ws) return;           // one we let go of ourselves
+      this.ws = null;
+      if (this.status !== 'open') return;
+      if (this.playing && this.key) { this.lose(); return; }
+      this.status = 'closed';
+      this.inbox.push({ t: 'left', id: 1, closed: true });
+    };
+  }
+
+  // A game begins on this connection.
+  start() { this.playing = true; this.heard(); }
+
+  heard() { this.heardAt = performance.now(); }
+
+  // "Are you there?" every two seconds (on a timer, so a tab in the
+  // background keeps asking): the relay answers, and a guest it stops
+  // hearing from in a game it counts as away. No answer for a while: the
+  // connection is dead whatever the socket says (Wi-Fi out of range closes
+  // nothing), so we start getting back in.
+  startBeat() {
+    clearInterval(this.beatTimer);
+    this.beatAt = performance.now();
+    this.beatTimer = setInterval(() => this.beat(), 2000);
+  }
+
+  beat() {
+    if (this.status !== 'open' || !this.key) return;
+    const now = performance.now();
+    if (now - this.beatAt > 5000) this.heardAt = now;      // the page itself was asleep: no telling yet
+    this.beatAt = now;
+    this.send({ t: 'ping' });
+    if (this.playing && now - this.heardAt > SILENT_MS) this.lose();
+  }
+
+  // The connection is gone in the middle of a game: tell the game, and try
+  // to get back into our place until the time is up.
+  lose() {
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) { try { ws.close(); } catch (e) { /* closing */ } }
+    this.status = 'lost';
+    this.lostAt = performance.now();
+    this.inbox.push({ t: 'lost', wait: REJOIN_MS });
+    this.rejoin();
+  }
+
+  rejoin() {
+    if (this.status !== 'lost') return;
+    if (performance.now() - this.lostAt > REJOIN_MS) { this.giveUp(); return; }
+    let ws;
+    try { ws = new WebSocket(this.address()); } catch (e) { this.retryTimer = setTimeout(() => this.rejoin(), 1500); return; }
+    this.trying = ws;
+    let over = false;
+    const again = () => {
+      if (over) return;
+      over = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch (e) { /* closing */ }
+      if (this.status === 'lost') this.retryTimer = setTimeout(() => this.rejoin(), 1500);
+    };
+    const timer = setTimeout(again, 4000);
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'rejoin', code: this.room, id: this.slot, key: this.key }));
+    ws.onerror = again;
+    ws.onclose = again;
+    ws.onmessage = (e) => {
+      if (over) return;
+      let m;
+      try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.t === 'rejoined') {
+        over = true;
+        clearTimeout(timer);
+        if (this.status !== 'lost') { try { ws.close(); } catch (err) { /* closing */ } return; }
+        this.trying = null;
+        this.ws = ws;
+        this.status = 'open';
+        this.wire(ws);
+        // Back: then what was missed, in order, marked as old news.
+        this.inbox.push({ t: 'rejoined' }, ...(m.missed || []).map((x) => ({ ...x, late: true })));
+      } else if (m.t === 'error') {
+        // Our place is gone (too long away, or the game is over).
+        over = true;
+        clearTimeout(timer);
+        try { ws.close(); } catch (err) { /* closing */ }
+        this.giveUp();
+      }
+    };
+  }
+
+  giveUp() {
+    if (this.status !== 'lost') return;
+    this.status = 'closed';
+    this.inbox.push({ t: 'left', id: 1, closed: true });
+  }
+
+  send(msg) {
+    if (this.ws && this.status === 'open') this.ws.send(JSON.stringify(msg));
+  }
+
+  take() {
+    const all = this.inbox;
+    this.inbox = [];
+    return all;
+  }
+
+  close() {
+    this.status = 'closed';
+    this.playing = false;
+    clearInterval(this.beatTimer);
+    clearTimeout(this.retryTimer);
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) ws.close();
+    if (this.trying) { try { this.trying.close(); } catch (e) { /* closing */ } this.trying = null; }
+  }
+}
+
+// Split screen: two games on one computer, joined by a pair of these in
+// place of the relay. Each message is copied, as if it had been sent, and
+// marked with its sender like the relay does.
+class LocalNet {
+  constructor(id) {
+    this.id = id;
+    this.inbox = [];
+    this.peer = null;
+    this.status = 'open';
+  }
+
+  send(msg) { if (this.peer && this.peer.status === 'open') this.peer.inbox.push({ ...JSON.parse(JSON.stringify(msg)), from: this.id }); }
+
+  take() {
+    const all = this.inbox;
+    this.inbox = [];
+    return all;
+  }
+
+  close() { this.status = 'closed'; }
+}
+
+export function localPair() {
+  const a = new LocalNet(1); const b = new LocalNet(2);
+  a.peer = b; b.peer = a;
+  return [a, b];
+}
+
+// Another player, as last reported, drawn between updates.
+class Rival {
+  constructor(id, name) {
+    Object.assign(this, {
+      id, name, x: -999, y: -999, prevX: -999, prevY: -999, tx: -999, ty: -999, vx: 0, vy: 0,
+      w: PLAYER.w, h: PLAYER.h, facing: 1, anim: 'idle', gems: 0, hearts: PARTY_HEARTS, roasts: 0, laps: 0,
+      carry: -1, dead: false, seen: false, hurtT: 0, age: 0, away: false,
+    });
+    Object.assign(this, SLOTS[id] || SLOTS[1]);
+  }
+
+  get cx() { return this.x + this.w / 2; }
+  get cy() { return this.y + this.h / 2; }
+
+  update() {
+    this.prevX = this.x; this.prevY = this.y;
+    if (this.hurtT > 0) this.hurtT--;
+    if (!this.seen) return;
+    // Not heard from for half a second (a bad connection): they stop where
+    // they were last, rather than gliding on at their last speed.
+    if (++this.age > 40) { this.vx = 0; this.vy = 0; }
+    // Extrapolate by the reported speed, then ease toward the target.
+    this.tx += Math.max(-8, Math.min(8, this.vx)); this.ty += this.vy;
+    const far = Math.abs(this.tx - this.x) + Math.abs(this.ty - this.y) > 160;
+    this.x = far ? this.tx : this.x + (this.tx - this.x) * 0.35;
+    this.y = far ? this.ty : this.y + (this.ty - this.y) * 0.35;
+  }
+}
+
+export class Party {
+  // `players`: [{ id, name }] (ids are slots 1-5; the host is 1).
+  // `settings`: { mode, goal, truce } as the host chose them.
+  constructor(net, { id, players, mode = 'treasure', goal = null, truce = TRUCES[0], local = false }) {
+    this.net = net;
+    this.id = id;
+    this.local = local;
+    this.mode = MODE_INFO[mode] ? mode : 'treasure';
+    this.goal = goal || MODE_INFO[this.mode].goals[0];
+    this.truceTicks = Math.round(truce * SECOND);
+    this.players = players;
+    this.name = (players.find((p) => p.id === id) || {}).name || `PLAYER ${id}`;
+    this.rivals = new Map(players.filter((p) => p.id !== id).map((p) => [p.id, new Rival(p.id, p.name)]));
+    Object.assign(this, SLOTS[id] || SLOTS[1]);
+    this.team = teamOf(id);
+    this.shots = [];
+    this.respawn = 0;           // ticks left while knocked out
+    this.result = null;         // { winner: id } or { team } or { left: true }
+    this.dropSeq = 0;
+    this.bag = [];              // the gems we hold, by value: what a hit can knock out of us
+    this.offline = null;        // our connection is lost: { until } (when we stop trying to get back)
+    this.idle = false;          // the host's app is put away: the game goes on for the others, we stand out of it
+    this.beat = { t: 0, period: 0, k: 0 };   // the heartbeat while someone lurks nearby
+    this.stateTimer = 0;
+    this.clock = 0;             // ticks since the start
+    this.roasts = 0;
+    this.laps = 0;
+    this.carry = -1;            // the team whose flag we hold
+    this.captures = [0, 0];
+    this.feed = [];             // kill feed: { text, t }
+    this.byId = new Map();      // every pickup, for bringing them back
+    this.gone = new Map();      // host: pickup id -> tick it comes back
+    this.spots = [];
+    this.itemSpots = [];
+    this.items = new Items(this);
+    if (net.start) net.start();
+  }
+
+  get host() { return this.id === 1; }
+  get role() { return this.host ? 'host' : 'guest'; }
+  get truce() { return Math.max(0, this.truceTicks - this.clock); }
+
+  // Players other than us still in the game, for shots and seekers to find.
+  targets() { return [...this.rivals.values()].filter((r) => r.seen && !r.dead && !r.away); }
+  nameOf(id) { return id === this.id ? this.name : (this.rivals.get(id) || {}).name || `PLAYER ${id}`; }
+  colorOf(id) { return (SLOTS[id] || SLOTS[1]).color; }
+
+  // ---------------------------------------------------------------- setup
+
+  // Set up a freshly loaded level for the game.
+  begin(game) {
+    game.enemies = [];
+    game.totals.enemies = 0;
+    game.lives = 99;
+    const p = game.player;
+    p.health = PARTY_HEARTS;
+    for (const r of this.rivals.values()) r.h = p.h;
+    game.pickups.forEach((k, i) => { k.id = `p${i}`; k.home = { x: k.x, y: k.y }; this.byId.set(k.id, k); });
+    if (this.mode === 'treasure' || this.mode === 'race') this.showExits(game);
+    const exits = game.props.filter((pr) => pr.kind === 'sign');
+    this.spots = this.spawnSpots(game, exits);
+    // The airboard and armor go where everyone can get to.
+    const inArena = this.spots.filter((s) => this.goodAt(game.level, s.tx, s.ty, 8, this.arena));
+    this.itemSpots = inArena.length >= 2 ? inArena : this.spots;
+    // A treasure hunt needs an exit: a level without one gets it as far from
+    // the starts as the level goes.
+    if (this.mode === 'treasure' && !exits.length) this.placeExit(game);
+    if (this.mode === 'treasure') this.layGems(game);
+    if (this.mode !== 'race') placeBoxes(game, this);
+    this.placeBoard(game);
+    if (this.mode === 'treasure') this.placeArmor(game);
+    // CTF bases (blue 0, red 1) from the level.
+    this.bases = [0, 1].map((team) => {
+      const o = game.level.objects.find((b) => b.type === 'base' && b.team === team);
+      return o && { x: o.tx * TILE + TILE / 2, y: o.ty * TILE + TILE, team };
+    });
+    const spot = this.spots[(this.id - 1) % this.spots.length];
+    if (spot) {
+      p.spawn(spot.x, spot.y);
+      game.respawn = { x: p.x, y: p.y };
+      game.cam = { x: p.cx - game.viewW / 2, y: p.cy - 180 };
+      game.clampCamera();
+      game.prevCam = { ...game.cam };
+    }
+  }
+
+  // Can a player stand in tile (tx, ty): two open cells over solid ground,
+  // nothing harmful there?
+  standable(level, tx, ty) {
+    if (tx < 1 || ty < 2 || tx >= level.w - 1 || ty >= level.h - 1) return false;
+    const cx = tx * TILE + TILE / 2;
+    const open = (y) => !level.solidAt(cx - 8, y) && !level.solidAt(cx + 8, y);
+    if (!open(ty * TILE + 4) || !open(ty * TILE + 28) || !open(ty * TILE - 20)) return false;
+    // Ground under the feet (tiles with a rounded top start lower down).
+    if (![4, 10, 16].some((d) => level.solidAt(cx, (ty + 1) * TILE + d))) return false;
+    if (level.areaAt(cx, ty * TILE + 16) || (ty + 1) * TILE > level.water) return false;
+    const ch = level.tiles[ty] && level.tiles[ty][tx];
+    return ch !== '^' && ch !== '~';
+  }
+
+  // Where players can get back from to the main part of the level. A rough
+  // map of moves between the places a player can be, on the generous side
+  // (high jumps, springs, swimming, vines, tubes and wind in any direction,
+  // poles, warps), so a place it can't get out of truly has no way out.
+  // Its biggest group of places all reachable from each other is the
+  // arena; a place is good if a player there can get into the arena.
+  // Spawns go on good places, and items and gold in the arena. `safe`:
+  // the strict map instead (plain jumps only, no vines, tubes or wind), on
+  // which whatever it reaches surely can be. null: no map to go by (a
+  // built-in level).
+  goodPlaces(level, springs = [], safe = false) {
+    const { w, h } = level;
+    if (!level.masks) return null;
+    const n = w * h;
+    const cx = (tx) => tx * TILE + TILE / 2;
+    const hollow = (tx, ty) => tx >= 0 && ty >= 0 && tx < w && ty < h
+      && !level.solidAt(cx(tx) - 8, ty * TILE + 16) && !level.solidAt(cx(tx) + 8, ty * TILE + 16) && !level.solidAt(cx(tx), ty * TILE + 4);
+    // place: 1 on a floor (one-way floors too), 2 moving freely (water,
+    // vines, tubes, wind).
+    const place = new Uint8Array(n);
+    for (let ty = 1; ty < h - 1; ty++) for (let tx = 1; tx < w - 1; tx++) {
+      if (!hollow(tx, ty)) continue;
+      const area = level.areaAt(cx(tx), ty * TILE + 16);
+      const ch = level.tiles[ty][tx];
+      if (area === 2 || ch === '^' || ch === '~') continue;
+      if ((area && !safe) || ty * TILE + 16 > level.water) { place[ty * w + tx] = 2; continue; }
+      // A floor under the middle, in this cell's lower part or the top of
+      // the next (a slope or a rounded top can sit either way).
+      if ([20, 24, 28, 36, 42, 48].some((d) => level.solidPx(cx(tx), ty * TILE + d, true))) place[ty * w + tx] = 1;
+    }
+    // Throws: springs (up so many tiles, or sideways), poles, warps.
+    const throws = new Map();
+    const at = (x, y) => { const tx = Math.floor(x / TILE); const ty = Math.floor(y / TILE); return tx >= 0 && ty >= 0 && tx < w && ty < h && hollow(tx, ty) ? ty * w + tx : -1; };
+    const addThrow = (i, t) => { if (i < 0) return; if (!place[i]) place[i] = 1; if (!throws.has(i)) throws.set(i, []); throws.get(i).push(t); };
+    for (const sp of springs) {
+      if (sp.dir) addThrow(at(sp.x + sp.w / 2, sp.y + sp.h / 2), { dir: sp.dir });
+      else addThrow(at(sp.x + sp.w / 2, sp.y - 1), { up: (safe ? { red: 8, green: 13, blue: 19 } : { red: 10, green: 16, blue: 23 })[sp.color] || 8 });
+    }
+    for (const o of level.objects) {
+      if (o.type === 'pole') addThrow(at(cx(o.tx), o.ty * TILE + 16), safe ? { up: 4, reach: 8 } : { up: 8, reach: 12 });
+      if (o.type === 'warp' && o.to) {
+        const t = level.objects.find((q) => q.type === 'warp' && q.id === o.to);
+        if (t) for (const dy of [0, -1]) addThrow(at(cx(o.tx), (o.ty + dy) * TILE + 16), { to: [t.tx, t.ty] });
+      }
+    }
+    // Falling from an open cell: where it lands (-1 nowhere: a pit).
+    const land = (tx, ty) => {
+      for (let k = 0; k < 40 && ty < h - 1; k++, ty++) {
+        if (place[ty * w + tx]) return ty * w + tx;
+        if (!hollow(tx, ty)) return -1;
+      }
+      return -1;
+    };
+    // Up a clear column as high as `up`, then across up to `reach` and down.
+    const arc = (tx, ty, up, reach, out) => {
+      for (let a = 1; a <= up && hollow(tx, ty - a); a++) {
+        if (place[(ty - a) * w + tx]) out.add((ty - a) * w + tx);
+        for (const d of [-1, 1]) {
+          for (let k = 1; k <= reach && hollow(tx + d * k, ty - a); k++) {
+            const l = land(tx + d * k, ty - a);
+            if (l >= 0) out.add(l);
+          }
+        }
+      }
+    };
+    const edges = (i) => {
+      const tx = i % w; const ty = (i - tx) / w; const out = new Set();
+      for (const d of [-1, 1]) if (hollow(tx + d, ty)) { const l = land(tx + d, ty); if (l >= 0) out.add(l); }
+      if (place[i] === 2) for (const j of [i - w, i + w]) if (place[j]) out.add(j); else if (j === i - w && hollow(tx, ty - 1)) arc(tx, ty - 1, 1, 6, out);
+      const l = land(tx, ty + 1); if (place[i] === 2 && l >= 0) out.add(l);
+      if (safe) arc(tx, ty, 4, 4, out); else arc(tx, ty, 6, 8, out);
+      for (const t of throws.get(i) || []) {
+        if (t.up) arc(tx, ty, t.up, t.reach || 8, out);
+        if (t.dir) for (let k = 1; k <= (safe ? 10 : 16) && hollow(tx + t.dir * k, ty); k++) { const f = land(tx + t.dir * k, ty); if (f >= 0) out.add(f); }
+        if (t.to) { const f = land(t.to[0], t.to[1]); if (f >= 0) out.add(f); else if (hollow(t.to[0], t.to[1])) out.add(t.to[1] * w + t.to[0]); }
+      }
+      out.delete(i);
+      return out;
+    };
+    const nodes = []; for (let i = 0; i < n; i++) if (place[i]) nodes.push(i);
+    if (nodes.length < 8) return null;
+    const out = new Map(); const back = new Map();
+    for (const i of nodes) back.set(i, []);
+    for (const i of nodes) { const e = [...edges(i)].filter((j) => back.has(j)); out.set(i, e); for (const j of e) back.get(j).push(i); }
+    // The biggest strongly connected group (Tarjan, without recursion).
+    const ix = new Map(); const lo = new Map(); const on = new Set(); const st = []; let index = 0;
+    let main = [];
+    for (const v0 of nodes) {
+      if (ix.has(v0)) continue;
+      const work = [[v0, 0]]; ix.set(v0, index); lo.set(v0, index++); st.push(v0); on.add(v0);
+      while (work.length) {
+        const top = work[work.length - 1]; const v = top[0]; const e = out.get(v);
+        if (top[1] < e.length) {
+          const u = e[top[1]++];
+          if (!ix.has(u)) { ix.set(u, index); lo.set(u, index++); st.push(u); on.add(u); work.push([u, 0]); }
+          else if (on.has(u)) lo.set(v, Math.min(lo.get(v), ix.get(u)));
+        } else {
+          work.pop();
+          if (work.length) { const p = work[work.length - 1][0]; lo.set(p, Math.min(lo.get(p), lo.get(v))); }
+          if (lo.get(v) === ix.get(v)) {
+            const comp = []; let x;
+            do { x = st.pop(); on.delete(x); comp.push(x); } while (x !== v);
+            if (comp.length > main.length) main = comp;
+          }
+        }
+      }
+    }
+    if (main.length < 8) return null;
+    // Everything that can get into the arena.
+    const good = new Uint8Array(n); const arena = new Uint8Array(n); const q = [...main];
+    for (const i of q) { good[i] = 1; arena[i] = 1; }
+    for (let k = 0; k < q.length; k++) for (const j of back.get(q[k])) if (!good[j]) { good[j] = 1; q.push(j); }
+    return { good, arena };
+  }
+
+  // Is (tx, ty), or the floor right under it, a good place (or with
+  // this.arena, a place in the arena)?
+  goodAt(level, tx, ty, depth = 8, map = this.good) {
+    if (!map) return true;
+    for (let k = 0; k < depth && ty + k < level.h; k++) {
+      if (map[(ty + k) * level.w + tx]) return true;
+      if (level.solidAt(tx * TILE + TILE / 2, (ty + k) * TILE + TILE / 2)) return false;
+    }
+    return false;
+  }
+
+  // Standable cells joined through open air to the given spots (so none is
+  // in a sealed room) and on the given map of places, every third column.
+  openFloor(level, from, map = this.good) {
+    const { w, h } = level;
+    const seen = new Uint8Array(w * h);
+    const air = (tx, ty) => tx >= 0 && ty >= 0 && tx < w && ty < h && !level.solidAt(tx * TILE + 16, ty * TILE + 16);
+    const queue = [];
+    for (const s of from) if (air(s.tx, s.ty)) { seen[s.ty * w + s.tx] = 1; queue.push(s.ty * w + s.tx); }
+    const out = [];
+    for (let i = 0; i < queue.length; i++) {
+      const tx = queue[i] % w; const ty = (queue[i] - tx) / w;
+      if (tx % 3 === 0 && this.standable(level, tx, ty) && this.goodAt(level, tx, ty, 1, map)) out.push([tx, ty]);
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = tx + dx; const ny = ty + dy;
+        if (air(nx, ny) && !seen[ny * w + nx]) { seen[ny * w + nx] = 1; queue.push(ny * w + nx); }
+      }
+    }
+    return out;
+  }
+
+  // Spawn spots: the level's starts, then places just under its pickups
+  // (put where players can get to), none near an exit, spread as far apart
+  // as they go. Every side works out the same list.
+  spawnSpots(game, exits) {
+    const level = game.level;
+    const near = (tx, ty) => this.mode !== 'race' && exits.some((e) => Math.hypot(e.x / TILE - tx, e.y / TILE - ty) < EXIT_CLEAR);
+    const out = [];
+    let starts = level.allStarts || level.entities.filter((e) => e.ch === 'P').map((e) => [e.tx, e.ty]);
+    const springs = game.props.filter((pr) => pr.kind === 'spring');
+    ({ good: this.good, arena: this.arena } = this.goodPlaces(level, springs) || {});
+    // Items and gold: the arena again on a stricter map (plain jumps, no
+    // vines, tubes or wind), unless that splits the level up too much.
+    const strict = this.arena && this.goodPlaces(level, springs, true);
+    const size = (a) => a.reduce((n, v) => n + v, 0);
+    if (strict && size(strict.arena) * 3 >= size(this.arena)) this.arena = strict.arena;
+    const add = (tx, ty, start) => {
+      if (near(tx, ty) || out.some((s) => s.tx === tx && s.ty === ty) || !this.goodAt(level, tx, ty)) return;
+      out.push({ tx, ty, start });
+    };
+    // A race starts everybody together, at the first start (JJ2 race maps
+    // often have Jazz's and Spaz's starts far apart).
+    if (this.mode === 'race') starts = starts.slice(0, 1);
+    for (const [tx, ty] of starts) add(tx, ty, true);
+    if (!level.allStarts) for (const e of level.entities) if (e.ch === 'P') add(e.tx, e.ty, true);
+    // No start on the map of good places (it's only rough): the starts anyway.
+    if (!out.length) for (const [tx, ty] of starts) if (!near(tx, ty)) out.push({ tx, ty, start: true });
+    // A race starts everybody at the start line.
+    if (this.mode !== 'race' || !out.length) {
+      for (const k of game.pickups) {
+        const tx = Math.floor((k.x + k.w / 2) / TILE);
+        for (let ty = Math.floor((k.y + k.h / 2) / TILE), n = 0; n < 8; ty++, n++) {
+          if (this.standable(level, tx, ty)) { add(tx, ty, false); break; }
+          if (level.solidAt(tx * TILE + 16, ty * TILE + 16)) break;
+        }
+      }
+    }
+    if (!out.length) {
+      const p = game.player;
+      out.push({ tx: Math.floor(p.cx / TILE), ty: Math.floor((p.y + p.h - 1) / TILE), start: true });
+    }
+    // Few pickups (small arenas): any floor in the open air the starts are
+    // in, every few columns, so five players still start apart.
+    if (this.mode !== 'race' && out.length < 12) for (const [tx, ty] of this.openFloor(level, out)) add(tx, ty, false);
+    // Farthest-point order: starts first, then each next spot the farthest
+    // from those already picked.
+    const picked = [out.find((s) => s.start) || out[0]];
+    const rest = out.filter((s) => s !== picked[0]);
+    while (rest.length && picked.length < 12) {
+      let best = 0; let bestD = -1;
+      rest.forEach((s, i) => {
+        // Level starts come first, unless crowded against one already picked.
+        const gap = Math.min(...picked.map((q) => Math.hypot(q.tx - s.tx, q.ty - s.ty)));
+        const d = gap + (s.start && gap >= 4 ? 6 : 0);
+        if (d > bestD) { bestD = d; best = i; }
+      });
+      picked.push(rest.splice(best, 1)[0]);
+    }
+    const ph = game.player.h;
+    return picked.map((s) => ({ tx: s.tx, ty: s.ty, x: s.tx * TILE + (TILE - PLAYER.w) / 2, y: s.ty * TILE + TILE - ph }));
+  }
+
+  // JJ2 exits are invisible areas: each group of them gets a sign standing
+  // on the floor under it, so players can see where to go.
+  showExits(game) {
+    const level = game.level;
+    const cells = game.props.filter((pr) => pr.kind === 'sign' && pr.hidden).map((pr) => [Math.round(pr.x / TILE), Math.round(pr.y / TILE)]);
+    const groups = [];
+    for (const [tx, ty] of cells) {
+      const g = groups.find((q) => q.some(([x, y]) => Math.abs(x - tx) <= 2 && Math.abs(y - ty) <= 2));
+      if (g) g.push([tx, ty]); else groups.push([[tx, ty]]);
+    }
+    for (const g of groups) {
+      const tx = Math.round(g.reduce((a, [x]) => a + x, 0) / g.length);
+      const top = Math.min(...g.map(([, y]) => y));
+      const bottom = Math.max(...g.map(([, y]) => y));
+      let ty = top;
+      while (ty < top + 10 && !this.standable(level, tx, ty)) ty++;
+      // No floor under it (an exit in the air or a tube): the sign marks the area.
+      game.addExit(tx, ty < top + 10 ? ty : bottom);
+    }
+  }
+
+  // An exit for a level that has none: the reachable spot with a floor
+  // farthest from the spawn spots.
+  placeExit(game) {
+    const level = game.level;
+    const s = this.spots[0];
+    let spot = null;
+    if (this.arena) {
+      // The arena place farthest from every spawn.
+      let bestD = -1;
+      for (let i = 0; i < this.arena.length; i++) {
+        if (!this.arena[i]) continue;
+        const tx = i % level.w; const ty = (i - tx) / level.w;
+        if (!this.standable(level, tx, ty)) continue;
+        const d = Math.min(...this.spots.map((q) => Math.hypot(q.tx - tx, q.ty - ty)));
+        if (d > bestD) { bestD = d; spot = [tx, ty]; }
+      }
+    }
+    if (!spot && level.farthestSpot && s) spot = level.farthestSpot(s.tx, s.ty);
+    if (!spot) {
+      let bestD = -1;
+      for (const k of game.pickups) {
+        const d = Math.min(...this.spots.map((q) => Math.hypot(q.x - k.x, q.y - k.y)));
+        if (d > bestD) { bestD = d; spot = [Math.floor(k.x / TILE), Math.floor(k.y / TILE)]; }
+      }
+    }
+    if (!spot) return;
+    game.addExit(spot[0], spot[1]);
+  }
+
+  // Treasure gems: worth twice the goal in all, and they never come back.
+  // Gold (10) is rare: a tenth of the value, two gems for a goal of 100, so
+  // no one find decides the hunt. A quarter of the value is purple (5),
+  // a little under a quarter green (3), the rest red (1). The level's own
+  // gem spots are used first (spread out, trimmed if there are too many),
+  // then open floor joined to the spawns. Gold goes where it's hard to
+  // get, far from every spawn and high up, and as far from the other gold
+  // as the map allows. Every side lays out the same gems.
+  layGems(game) {
+    const target = this.goal * 2;
+    const gold = Math.max(1, Math.round((target * 0.1) / 10));
+    const purple = Math.round((target * 0.25) / 5);
+    const green = Math.round((target * 0.225) / 3);
+    const red = Math.max(0, target - gold * 10 - purple * 5 - green * 3);
+    const count = gold + purple + green + red;
+    const level = game.level;
+    let gems = game.pickups.filter((k) => k.kind === 'gem' && !k.droppedBy);
+    const spawnD = (k) => Math.min(...this.spots.map((s) => Math.hypot(s.x - k.x, s.y - k.y))) / TILE;
+    const exits = game.props.filter((pr) => pr.kind === 'sign');
+    const nearExit = (x, y) => exits.some((e) => Math.hypot(e.x - x, e.y - y) < 3 * TILE);
+    if (gems.length < count) {
+      // More spots: open floor joined to the spawns, every third column,
+      // away from the exits and the gems already there.
+      const floor = this.openFloor(level, this.spots, this.arena).map(([tx, ty]) => ({ x: tx * TILE + 6, y: ty * TILE + 6 }))
+        .filter((c) => !nearExit(c.x, c.y) && !gems.some((k) => Math.abs(k.x - c.x) < TILE && Math.abs(k.y - c.y) < TILE));
+      floor.sort((a, b) => (spawnD(b) - spawnD(a)) || (a.x - b.x) || (a.y - b.y));
+      // Spread: every so many of them, as many as needed.
+      const step = Math.max(1, Math.floor(floor.length / Math.max(1, count - gems.length)));
+      for (let i = 0; i < floor.length && gems.length < count; i += step) {
+        const k = new Pickup('gem', floor[i].x, floor[i].y, { color: 'red', value: 1, score: 100, w: 20, h: 20 });
+        k.id = `t${i}`; k.home = { x: k.x, y: k.y };
+        this.byId.set(k.id, k);
+        game.pickups.push(k);
+        gems.push(k);
+      }
+    } else if (gems.length > count) {
+      // Too many: keep the ones most apart from each other.
+      const keep = [];
+      const rest = [...gems].sort((a, b) => (a.x - b.x) || (a.y - b.y));
+      keep.push(rest.shift());
+      while (keep.length < count && rest.length) {
+        let best = 0; let bestD = -1;
+        rest.forEach((k, i) => {
+          const d = Math.min(...keep.map((q) => Math.hypot(q.x - k.x, q.y - k.y)));
+          if (d > bestD) { bestD = d; best = i; }
+        });
+        keep.push(rest.splice(best, 1)[0]);
+      }
+      const gone = new Set(rest);
+      game.pickups = game.pickups.filter((k) => !gone.has(k));
+      for (const k of rest) this.byId.delete(k.id);
+      gems = keep;
+    }
+    // How hard each is to get to: distance from the spawns, and height
+    // above the lowest spawn.
+    const low = Math.max(...this.spots.map((s) => s.y));
+    const hard = (k) => spawnD(k) + Math.max(0, (low - k.y) / TILE) * 0.8;
+    const order = [...gems].sort((a, b) => (hard(b) - hard(a)) || (a.x - b.x) || (a.y - b.y));
+    const set = (k, color, value) => Object.assign(k, { color, value, score: value * 100 });
+    gems.forEach((k) => set(k, 'red', 1));
+    // Gold: each on a floor in the arena (hard to get, never impossible).
+    // The first is the hardest gem of all to get; each one after it is
+    // picked for being far from the gold already laid (and still hard to
+    // get), so they end up in different parts of the map.
+    const fair = (k) => {
+      const tx = Math.floor((k.x + k.w / 2) / TILE); const ty = Math.floor((k.y + k.h / 2) / TILE);
+      // Not in a warp's mouth (it whisks the player off before the gem).
+      if (game.warps.some((o) => Math.abs(o.tx - tx) <= 1 && ty >= o.ty - 2 && ty <= o.ty + 1)) return false;
+      return this.goodAt(level, tx, ty, 2, this.arena);
+    };
+    const golds = [];
+    const cands = order.filter(fair);
+    while (golds.length < gold && cands.length) {
+      let best = 0; let bestScore = -1;
+      if (golds.length) {
+        // Far from the gold already laid counts most; harder to reach (earlier
+        // in the list) counts too, up to twice as much; on a spawn's doorstep
+        // counts against.
+        cands.forEach((k, i) => {
+          const d = Math.min(...golds.map((q) => Math.hypot(q.x - k.x, q.y - k.y)));
+          const score = d * (2 - i / cands.length) * (spawnD(k) >= 10 ? 1 : 0.5);
+          if (score > bestScore) { bestScore = score; best = i; }
+        });
+      }
+      golds.push(cands.splice(best, 1)[0]);
+    }
+    for (const k of order) { if (golds.length >= gold) break; if (!golds.includes(k)) golds.push(k); }
+    golds.forEach((k) => set(k, 'gold', 10));
+    const others = order.filter((k) => !golds.includes(k));
+    others.slice(0, purple).forEach((k) => set(k, 'purple', 5));
+    others.slice(purple, purple + green).forEach((k) => set(k, 'green', 3));
+    // A small level with too few spots: the hardest red gems turn green,
+    // then green ones purple, until the value adds up.
+    let short = target - gems.reduce((n, k) => n + k.value, 0);
+    for (const [from, to, value] of [['red', 'green', 3], ['green', 'purple', 5]]) {
+      for (const k of others) {
+        if (short <= 0) break;
+        if (k.color !== from || value - k.value > short) continue;
+        short -= value - k.value;
+        set(k, to, value);
+      }
+    }
+    // Still one or a few short (every step above adds 2): a purple one
+    // turns gold, then green ones back to red, so it adds up exactly.
+    if (short > 0) {
+      const k = others.find((q) => q.color === 'purple') || others.find((q) => q.color === 'green');
+      if (k) {
+        short -= 10 - k.value;
+        set(k, 'gold', 10);
+        for (const q of [...others].reverse()) {
+          if (short >= 0) break;
+          if (q.color === 'green') { short += 2; set(q, 'red', 1); }
+        }
+      }
+    }
+  }
+
+  // One airboard in the level (the level's own go): whoever takes it rides
+  // for 30 s; a hit or a knockout drops it where they were, and when the
+  // ride ends it turns up somewhere else.
+  placeBoard(game) {
+    game.pickups = game.pickups.filter((k) => k.kind !== 'airboard');
+    const s = this.itemSpots[this.itemSpots.length - 1];
+    if (!s) return;
+    const k = new Pickup('airboard', s.x - 7, s.y + game.player.h - 18, { w: 32, h: 14, id: 'board', t: 0 });
+    k.home = { x: k.x, y: k.y };
+    game.pickups.push(k);
+    this.byId.set(k.id, k);
+    this.boardTime = 0;
+  }
+
+  // Put the airboard down at (x, y) (it falls to the floor): here, and for
+  // everyone else.
+  dropBoard(game, x, y, tell = true) {
+    const k = this.byId.get('board');
+    if (!k) return;
+    Object.assign(k, { taken: false, pending: false, x: Math.round(x - k.w / 2), y: Math.round(y - k.h), vx: 0, vy: 0, falling: true });
+    k.home = { x: k.x, y: k.y };
+    if (!game.pickups.includes(k)) game.pickups.push(k);
+    game.effect('sparkle', k.x + k.w / 2, k.y + k.h / 2);
+    if (tell) this.net.send({ t: 'board', x: Math.round(x), y: Math.round(y) });
+  }
+
+  // Off the board (a hit, a knockout, or the time is up).
+  leaveBoard(game, timeUp = false) {
+    const p = game.player;
+    if (!p.board) return;
+    p.loseBoard(game);
+    this.boardTime = 0;
+    if (!timeUp) { this.dropBoard(game, p.cx, p.y + p.h); return; }
+    // Its time is up: it turns up at the spot farthest from us.
+    let best = this.itemSpots[0]; let bestD = -1;
+    for (const s of this.itemSpots) {
+      const d = Math.hypot(s.x - p.x, s.y - p.y);
+      if (d > bestD) { bestD = d; best = s; }
+    }
+    this.dropBoard(game, best.x + PLAYER.w / 2, best.y + game.player.h);
+    game.banner(tr('THE AIRBOARD FLEW OFF'), 60);
+  }
+
+  // Treasure hunt armor: no harm for 10 s; one at a time, the next one two
+  // minutes after it's taken, somewhere else.
+  placeArmor(game) {
+    this.armorSpot = Math.max(0, this.itemSpots.length - 2);
+    const s = this.itemSpots[this.armorSpot];
+    if (!s) return;
+    const k = new Pickup('armor', s.x - 5, s.y + game.player.h - 30, { w: 28, h: 30, id: 'armor', t: 0 });
+    k.home = { x: k.x, y: k.y };
+    game.pickups.push(k);
+    this.byId.set(k.id, k);
+  }
+
+  // A spot to come back at: the one farthest from the other players.
+  respawnSpot() {
+    const live = this.targets();
+    let best = this.spots[0]; let bestD = -1;
+    for (const s of this.spots) {
+      const d = live.length ? Math.min(...live.map((r) => Math.hypot(r.x - s.x, r.y - s.y))) : Math.random();
+      const score = d + Math.random() * 40;
+      if (score > bestD) { bestD = score; best = s; }
+    }
+    return best;
+  }
+
+  // ---------------------------------------------------------------- tick
+
+  tick(game) {
+    for (const m of this.net.take()) this.receive(game, m);
+    const p = game.player;
+    const wasTruce = this.truce > 0;
+    this.clock++;
+    if (wasTruce && this.truce === 0 && this.truceTicks) {
+      game.banner(tr('FIGHT!'), 120);
+      game.audio.play('fanfare');
+      game.flash('#ffffff', 8);
+    }
+    if (this.respawn > 0 && --this.respawn === 0) {
+      const s = this.respawnSpot();
+      p.spawn(s.x, s.y);
+      game.respawn = { x: p.x, y: p.y };
+      p.invuln = RESPAWN_SAFE;
+      p.health = PARTY_HEARTS;
+      game.effect('sparkle', p.cx, p.cy);
+      this.beam(game, p.cx, p.y + p.h);
+      game.audio.play('secret');
+    }
+    if (p.armor > 0) p.armor--;
+    // No connection, or the app put away: nothing can hurt us until we are back.
+    if ((this.offline || this.idle) && !p.dead) p.invuln = Math.max(p.invuln, 2);
+    if (p.board && this.boardTime > 0 && --this.boardTime <= 0) this.leaveBoard(game, true);
+    // Last seconds of the truce: 3, 2, 1.
+    const left = Math.ceil(this.truce / SECOND);
+    if (this.truce > 0 && left <= 3 && this.truce % Math.round(SECOND) === 0) game.audio.play('tally');
+    this.warnings(game);
+    if (++this.stateTimer >= 3) {
+      this.stateTimer = 0;
+      this.net.send({
+        t: 's', x: Math.round(p.x), y: Math.round(p.y), vx: +p.vx.toFixed(2), vy: +p.vy.toFixed(2), f: p.facing, a: p.anim,
+        g: game.gems, d: p.dead ? 1 : 0, h: p.health, r: this.roasts, l: this.laps, c: this.carry,
+        e: (this.items.bubble ? 1 : 0) | (this.items.shrink ? 2 : 0) | (p.frog ? 4 : 0) | (p.armor > 0 ? 8 : 0),
+      });
+    }
+    for (const r of this.rivals.values()) r.update();
+    for (const s of this.shots) s.update(game);
+    // Others' shots against us (missiles and TNT blast us instead); ours
+    // fizzle on them (they decide the hit). No harm at all in the truce.
+    if (!p.dead && !this.truce) {
+      for (const s of this.shots) {
+        if (s.dead || s.weapon === TNT || !overlap(s, p)) continue;
+        if (s.explosive) s.burst(game);
+        else { s.dead = true; this.hit(game, s.x, s.owner); }
+      }
+    }
+    if (!this.truce) {
+      for (const s of game.shots) {
+        if (s.dead || s.weapon === TNT) continue;
+        if (!this.targets().some((r) => overlap(s, r))) continue;
+        s.dead = true;
+        game.effect(s.explosive ? 'explosion' : 'hitSpark', s.cx, s.cy, s.explosive ? 3 : undefined);
+      }
+    }
+    this.shots = this.shots.filter((s) => !s.dead);
+    this.items.tick(game);
+    this.suspense(game);
+    if (this.host) this.bringBack(game);
+    if (this.mode === 'ctf') this.flags(game);
+    this.feed = this.feed.filter((f) => ++f.t < 360);
+  }
+
+  // The host's app put away, or back (src/main.js keeps the game ticking
+  // meanwhile): the others see us stepped away, and nothing hurts us.
+  stepAway(game, away) {
+    this.idle = away;
+    this.net.send({ t: away ? 'away' : 'returned', id: this.id, idle: true });
+    const p = game.player;
+    if (!away && !p.dead) p.invuln = Math.max(p.invuln, RESPAWN_SAFE);
+  }
+
+  // Host: pickups whose time has come appear again, for everyone.
+  bringBack(game) {
+    for (const [id, at] of this.gone) {
+      if (this.clock < at) continue;
+      this.gone.delete(id);
+      // The armor comes back somewhere else each time.
+      if (id === 'armor' && this.itemSpots.length > 1) {
+        // Hop round the spots, half the list on, skipping any right by the
+        // last place (however few spots the level has, it moves).
+        const last = this.itemSpots[this.armorSpot]; const n = this.itemSpots.length;
+        let next = (this.armorSpot + 1 + Math.floor(n / 2)) % n;
+        for (let k = 0; k < n && (next === this.armorSpot || Math.hypot(this.itemSpots[next].x - last.x, this.itemSpots[next].y - last.y) < 4 * TILE); k++) next = (next + 1) % n;
+        this.armorSpot = next;
+        const s = this.itemSpots[this.armorSpot];
+        const at = { x: s.x - 5, y: s.y + game.player.h - 30 };
+        this.restore(game, id, at);
+        this.net.send({ t: 'back', id, x: at.x, y: at.y });
+        continue;
+      }
+      this.restore(game, id);
+      this.net.send({ t: 'back', id });
+    }
+  }
+
+  restore(game, id, at = null) {
+    const k = this.byId.get(id);
+    if (!k) return;
+    if (at) k.home = { x: at.x, y: at.y };
+    Object.assign(k, { taken: false, pending: false, x: k.home.x, y: k.home.y });
+    if (!game.pickups.includes(k)) game.pickups.push(k);
+    game.effect('sparkle', k.x + k.w / 2, k.y + k.h / 2);
+  }
+
+  // A pickup is gone (taken by someone): the host times its return.
+  taken(game, k, by) {
+    k.taken = true;
+    const t = k.trigger;
+    if (t && by !== this.id) game.level.setTrigger(t.id, t.toggle ? !game.level.triggerState.has(t.id) : t.on);
+    if (k.kind === 'airboard') return;          // it comes back when the ride ends
+    if (k.kind === 'armor') { if (this.host) this.gone.set(k.id, this.clock + ARMOR_BACK); return; }
+    // Treasure gems are gone for good (the hunt is for what's out there).
+    const keep = this.mode === 'treasure' && k.kind === 'gem';
+    if (this.host && k.home && !k.droppedBy && !k.trigger && !keep) this.gone.set(k.id, this.clock + GEM_BACK);
+  }
+
+  // ---------------------------------------------------------------- harm
+
+  // We were hit (a shot, a blast, or the scenery): a heart goes, and in a
+  // treasure hunt up to five gems' worth falls out. With no hearts left we're
+  // knocked out for 5 s. `by`: the player whose shot it was.
+  hit(game, fromX, by = null) {
+    const p = game.player;
+    if (p.dead || p.invuln > 0 || this.result || this.offline || this.idle) return;
+    if (by && this.truce) return;
+    if (p.armor > 0) { game.audio.play('shieldHit'); game.effect('hitSpark', p.cx, p.cy); return; }
+    p.health--;
+    this.leaveBoard(game);
+    if (game.bird) game.bird.flyAway();
+    const shed = this.mode === 'treasure' ? this.shed(game) : [];
+    if (shed.length) {
+      const drops = shed.map((v) => ({ id: `d${this.id}-${this.dropSeq++}`, x: Math.round(p.cx - 10), y: Math.round(p.y + 4), vx: +((Math.random() - 0.5) * 6).toFixed(2), vy: +(-3 - Math.random() * 3).toFixed(2), v }));
+      this.addDrops(game, drops, this.id);
+      this.net.send({ t: 'drop', drops });
+      game.banner(tr('-{0} GEMS', shed.reduce((a, b) => a + b, 0)), 50);
+    }
+    if (this.carry >= 0) this.dropFlag(game);
+    if (p.health <= 0) { this.knockOut(game, by); return; }
+    p.invuln = 90;
+    p.knock = 14;
+    p.vx = (p.cx < fromX ? -1 : 1) * 4;
+    p.vy = -4;
+    p.cry(game);
+    game.flash('#ff2a4a', 6);
+  }
+
+  // The gems a hit knocks out of us: real ones, out of what we hold. The
+  // cheapest go first, worth up to PARTY_DROP in all (a dearer gem that is
+  // all we have goes whole). Holding nothing, nothing falls: no gem appears
+  // that nobody ever picked up. Returns their values.
+  shed(game) {
+    // Out of step with the count (it shouldn't be): go by the count, in red.
+    if (this.bag.reduce((a, b) => a + b, 0) !== game.gems) this.bag = Array.from({ length: Math.max(0, game.gems) }, () => 1);
+    const bag = this.bag.sort((a, b) => a - b);
+    const out = [];
+    let worth = 0;
+    while (bag.length && (!out.length || worth + bag[0] <= PARTY_DROP)) { worth += bag[0]; out.push(bag.shift()); }
+    game.gems -= worth;
+    return out;
+  }
+
+  // Knocked out: back in 5 s, gems kept.
+  knockOut(game, by = null) {
+    const p = game.player;
+    if (p.dead) return;
+    if (this.carry >= 0) this.dropFlag(game);
+    this.leaveBoard(game);
+    p.dead = true; p.health = 0; p.vy = -8; p.vx = 0; p.pole = null; p.armor = 0; p.shield = 0;
+    this.respawn = PARTY_RESPAWN;
+    game.audio.play('death');
+    game.shake(10);
+    this.net.send({ t: 'ko', by });
+    this.say(by ? tr('{0} ROASTED {1}', this.nameOf(by), this.name) : tr('{0} WAS KNOCKED OUT', this.name));
+  }
+
+  say(text) { this.feed.push({ text, t: 0 }); if (this.feed.length > 4) this.feed.shift(); }
+
+  // A column of light where a player comes back.
+  beam(game, x, y) {
+    for (let i = 0; i < 26; i++) {
+      game.particles.push(new game.Particle(x + (Math.random() - 0.5) * 18, y - Math.random() * 120, 0, -0.6 - Math.random(), i % 2 ? this.color : '#ffffff', 34, 3, 0, true));
+    }
+  }
+
+  // Someone close to winning: everyone hears about it, once.
+  warnings(game) {
+    if (this.result) return;
+    const near = Math.max(1, Math.round(this.goal * 0.1));
+    this.warned = this.warned || new Set();
+    for (const row of this.standings(game)) {
+      if (row.value <= 0 || row.value < this.goal - near || this.warned.has(row.id) || this.mode === 'ctf') continue;
+      this.warned.add(row.id);
+      this.say(tr('{0} IS ALMOST THERE!', row.name));
+      if (row.me) game.audio.play('rank');
+    }
+  }
+
+  // Gems knocked out of a player fly out, each the gem it was (`v`, its
+  // value); whoever dropped them can't grab them back for the first 80 ticks.
+  addDrops(game, drops, by) {
+    for (const d of drops) {
+      const v = GEM_COLOR[d.v] ? d.v : 1;
+      const k = new Pickup('gem', d.x, d.y, { color: GEM_COLOR[v], value: v, score: v * 100, w: 20, h: 20, id: d.id, vx: d.vx, vy: d.vy, falling: true, droppedBy: by, t: 0 });
+      game.pickups.push(k);
+      this.byId.set(k.id, k);
+    }
+  }
+
+  // Our player touched a pickup. The host collects at once and says so; the
+  // others hide it and ask the host, who grants it if it's still there.
+  touch(game, k) {
+    if (this.offline || this.idle) return;   // nobody to ask (or nobody here to take it)
+    if (k.droppedBy === this.id && k.t < 80) return;
+    if (k.kind === 'itembox' && this.items.held) return;     // one item at a time
+    if (this.host) {
+      const item = k.kind === 'itembox' ? Items.roll() : undefined;
+      this.grab(game, k, item);
+      this.taken(game, k, this.id);
+      this.net.send({ t: 'got', id: k.id, by: this.id, item });
+    } else if (!k.pending) {
+      k.pending = true;
+      this.net.send({ t: 'take', id: k.id, to: 1 });
+    }
+  }
+
+  // Collect a pickup that's ours: an item box gives its item.
+  grab(game, k, item) {
+    const p = game.player;
+    if (k.kind === 'armor') {
+      k.taken = true;
+      Object.assign(p, { armor: ARMOR_TIME, shield: ARMOR_TIME, shieldType: 'plasma' });
+      game.audio.play('shieldHit');
+      game.banner(tr('ARMOR!'), 60);
+      game.ring(p.cx, p.cy, '#7ae8ff');
+      return;
+    }
+    if (k.kind === 'airboard') {
+      if (p.board) return;
+      k.collect(game);
+      this.boardTime = BOARD_TIME;
+      return;
+    }
+    if (k.kind === 'gem') {
+      // Into the bag, at what it was worth.
+      const had = game.gems;
+      k.collect(game);
+      if (game.gems > had) this.bag.push(game.gems - had);
+      return;
+    }
+    if (k.kind !== 'itembox') { k.collect(game); return; }
+    k.taken = true;
+    game.effect('sparkle', k.x + k.w / 2, k.y + k.h / 2);
+    this.items.give(game, item);
+  }
+
+  // ---------------------------------------------------------------- suspense
+
+  // The others who are close but not on our screen yet: { r, k, sx, sy },
+  // `k` from 0 (just in range) to 1 (about to come into view), (sx, sy)
+  // where they are relative to the view's top left.
+  lurkers(game) {
+    const out = [];
+    const cam = game.cam || { x: 0, y: 0 };
+    for (const r of this.rivals.values()) {
+      if (!r.seen || r.dead || r.away) continue;
+      const sx = r.cx - cam.x; const sy = r.cy - cam.y;
+      const ox = sx < 0 ? -sx : Math.max(0, sx - game.viewW);
+      const oy = sy < 0 ? -sy : Math.max(0, sy - VIEW_H);
+      const d = Math.hypot(ox, oy);
+      if (d > 0 && d < LURK_RANGE) out.push({ r, k: 1 - d / LURK_RANGE, sx, sy });
+    }
+    return out;
+  }
+
+  // A heartbeat while someone lurks: slow when they're far, quick when
+  // they're about to appear (the HUD's warning throbs in time with it). The
+  // sound waits for the fighting to start; one computer shows both players
+  // anyway, so it keeps quiet there.
+  suspense(game) {
+    const b = this.beat;
+    const p = game.player;
+    const k = p.dead || this.result || this.offline ? 0 : Math.max(0, ...this.lurkers(game).map((l) => l.k));
+    b.k = k;
+    if (!k) { b.t = 0; b.period = 0; return; }
+    const period = Math.round(64 - 34 * k);       // ticks: about 0.9 s down to 0.4 s
+    if (!b.period || ++b.t >= b.period) {
+      b.t = 0; b.period = period;
+      if (!this.local && !this.truce) {
+        const vol = 0.2 + 0.3 * k;
+        game.audio.tone({ wave: 'triangle', from: 150, to: 62, dur: 0.13, vol });
+        game.audio.tone({ wave: 'triangle', from: 120, to: 55, dur: 0.12, vol: vol * 0.7, delay: 0.17 });
+      }
+    }
+  }
+
+  // Our TNT went off: the others' copies (or a JJ2 bomb there) go off too.
+  boom(x, y) { this.net.send({ t: 'boom', x: Math.round(x), y: Math.round(y) }); }
+
+  tile(tx, ty, opts = {}) { this.net.send({ t: 'tile', x: tx, y: ty, w: opts.weapon || 0, b: opts.blast ? 1 : 0 }); }
+  fire(shot) { this.net.send({ t: 'shot', x: Math.round(shot.x), y: Math.round(shot.y), vx: +shot.vx.toFixed(2), vy: +shot.vy.toFixed(2), w: shot.weapon, p: shot.powered ? 1 : 0, l: shot.life, h: shot.whammo || undefined }); }
+
+  // ---------------------------------------------------------------- goals
+
+  // A lap done (race): past the goal wins, else back to the start line.
+  lap(game, back = true) {
+    if (this.result) return;
+    this.laps++;
+    game.audio.play('checkpoint');
+    if (this.laps >= this.goal) { this.win(game); return; }
+    game.banner(tr('LAP {0} / {1}', this.laps + 1, this.goal), 90);
+    if (back) {
+      const s = this.spots[(this.id - 1) % this.spots.length];
+      const p = game.player;
+      p.spawn(s.x, s.y);
+      game.warpTo({ x: s.x - (TILE - PLAYER.w) / 2, w: TILE, bottom: s.y + p.h });
+    }
+  }
+
+  // Capture the flag: take the other flag at its base, score at your own
+  // while your flag is home. A hit drops the flag (it goes home).
+  flags(game) {
+    const p = game.player;
+    if (p.dead || this.result || this.offline || !this.bases[0] || !this.bases[1]) return;
+    const near = (b) => Math.abs(p.cx - b.x) < 24 && Math.abs(p.y + p.h - b.y) < 40;
+    const other = 1 - this.team;
+    const home = (team) => this.carry !== team && ![...this.rivals.values()].some((r) => r.carry === team && !r.dead && !r.away);
+    if (this.carry < 0 && near(this.bases[other]) && home(other)) {
+      this.carry = other;
+      game.audio.play('select');
+      game.banner(tr('YOU HAVE THE FLAG!'), 80);
+      this.net.send({ t: 'flag', take: other });
+      this.say(tr('{0} TOOK THE {1} FLAG', this.name, tr(TEAMS[other].name)));
+    } else if (this.carry === other && near(this.bases[this.team]) && home(this.team)) {
+      this.carry = -1;
+      this.captures[this.team]++;
+      game.audio.play('fanfare');
+      game.flash('#ffffff', 6);
+      this.net.send({ t: 'cap', team: this.team });
+      this.say(tr('{0} SCORED FOR {1}', this.name, tr(TEAMS[this.team].name)));
+      if (this.captures[this.team] >= this.goal) this.win(game);
+    }
+  }
+
+  dropFlag(game) {
+    const team = this.carry;
+    this.carry = -1;
+    this.net.send({ t: 'flag', back: team });
+    this.say(tr('THE {0} FLAG WENT HOME', tr(TEAMS[team].name)));
+  }
+
+  // Treasure hunt: the exit counts with enough gems.
+  canExit(game) { return game.gems >= this.goal; }
+
+  win(game) {
+    if (this.result) return;
+    this.result = this.mode === 'ctf' ? { team: this.team } : { winner: this.id };
+    this.net.send({ t: 'win', team: this.mode === 'ctf' ? this.team : undefined });
+    game.audio.play('fanfare');
+  }
+
+  // Everyone in order of how well they're doing: { id, name, color, value, me }.
+  standings(game) {
+    const value = (o) => (this.mode === 'treasure' ? o.gems : this.mode === 'battle' ? o.roasts : this.mode === 'race' ? o.laps : this.captures[teamOf(o.id)]);
+    const me = { id: this.id, gems: game.gems, roasts: this.roasts, laps: this.laps };
+    const rows = [me, ...this.rivals.values()].map((o) => ({ id: o.id, name: this.nameOf(o.id), color: this.colorOf(o.id), value: value(o), me: o.id === this.id, dead: o === me ? game.player.dead : o.dead || o.away }));
+    return rows.sort((a, b) => b.value - a.value || a.id - b.id);
+  }
+
+  // ---------------------------------------------------------------- messages
+
+  receive(game, m) {
+    // Old news from while we were away: only what still matters.
+    if (m.late && !LATE_OK.has(m.t)) return;
+    if (this.items.receive(game, m)) return;
+    const from = m.from;
+    const find = (id) => game.pickups.find((k) => k.id === id && !k.taken);
+    switch (m.t) {
+      case 's': {
+        const r = this.rivals.get(from);
+        if (!r) break;
+        if (!r.seen) { r.x = m.x; r.y = m.y; r.prevX = m.x; r.prevY = m.y; }
+        // A heart gone: they blink, and we see what it cost them.
+        if (r.seen && !r.dead && m.h < r.hearts && !m.d) {
+          r.hurtT = 60;
+          game.popups.push({ x: r.cx, y: r.y - 24, text: '-1', life: 50, color: '#ff4a6a' });
+        }
+        r.age = 0;
+        Object.assign(r, { tx: m.x, ty: m.y, vx: m.vx, vy: m.vy, facing: m.f, anim: m.a, gems: m.g, dead: !!m.d, hearts: m.h, roasts: m.r, laps: m.l, carry: m.c, bubble: !!(m.e & 1), shrink: !!(m.e & 2), frog: !!(m.e & 4), armor: !!(m.e & 8), seen: true });
+        break;
+      }
+      case 'shot': {
+        // Their shot flies here as well, but only hurts us.
+        const b = new Bullet(m.w || 1, !!m.p, m.x, m.y, m.vx, m.vy, { remote: true });
+        b.owner = from;
+        if (m.h && m.w === 1) b.setWhammo(String(m.h));
+        if (m.l) b.life = m.l;
+        this.shots.push(b);
+        // Heard as far as it is from our screen: loud in view, fading with
+        // distance, silent from across the map (it used to sound the same
+        // from anywhere). On one computer the shooter's own game played it.
+        if (!this.local) game.sound(b.weapon === 6 ? 'flame' : 'shoot', m.x, m.y, SHOT_RANGE);
+        break;
+      }
+      case 'drop': this.addDrops(game, m.drops, from); break;
+      case 'take': {              // host: someone asks for a pickup
+        const k = find(m.id);
+        if (k && !k.pending) {
+          this.taken(game, k, from);
+          this.net.send({ t: 'got', id: m.id, by: from, item: k.kind === 'itembox' ? Items.roll() : undefined });
+        } else this.net.send({ t: 'deny', id: m.id, to: from });
+        break;
+      }
+      case 'got': {
+        const k = this.byId.get(m.id);
+        if (!k) break;
+        if (m.by === this.id) { if (!k.taken) { this.grab(game, k, m.item); this.taken(game, k, this.id); } } else if (!k.taken) this.taken(game, k, m.by);
+        break;
+      }
+      case 'deny': { const k = this.byId.get(m.id); if (k) k.pending = false; break; }
+      case 'back': this.restore(game, m.id, m.x !== undefined ? { x: m.x, y: m.y } : null); break;
+      case 'board': this.dropBoard(game, m.x, m.y, false); break;
+      case 'tile': game.hitTile(m.x, m.y, { stomp: true, speed: true, collapse: true, weapon: m.w, blast: !!m.b, remote: true }); break;
+      case 'boom': {
+        const near = (s) => s.weapon === TNT && !s.dead && Math.abs(s.cx - m.x) < 24 && Math.abs(s.cy - m.y) < 24;
+        for (const s of this.shots) if (near(s)) s.burst(game);
+        for (const s of game.shots) if (near(s) && s.placed) s.burst(game);
+        break;
+      }
+      case 'ko': {
+        // `from` was knocked out, by `m.by` if a player did it.
+        if (m.by === this.id) {
+          this.roasts++;
+          game.audio.play('rank');
+          game.banner(tr('YOU ROASTED {0}!', this.nameOf(from)), 70);
+          if (this.mode === 'battle' && this.roasts >= this.goal) this.win(game);
+        }
+        this.say(m.by ? tr('{0} ROASTED {1}', this.nameOf(m.by), this.nameOf(from)) : tr('{0} WAS KNOCKED OUT', this.nameOf(from)));
+        break;
+      }
+      case 'flag':
+        if (m.take !== undefined) this.say(tr('{0} TOOK THE {1} FLAG', this.nameOf(from), tr(TEAMS[m.take].name)));
+        else this.say(tr('THE {0} FLAG WENT HOME', tr(TEAMS[m.back].name)));
+        break;
+      case 'cap':
+        this.captures[m.team]++;
+        this.say(tr('{0} SCORED FOR {1}', this.nameOf(from), tr(TEAMS[m.team].name)));
+        if (m.team === this.team) game.audio.play('rank');
+        break;
+      case 'win':
+        if (!this.result) {
+          this.result = m.team !== undefined && m.team !== null ? { team: m.team } : { winner: from };
+          const mine = this.result.team === this.team && this.mode === 'ctf';
+          if (!this.local) game.audio.play(mine ? 'fanfare' : 'gameover');
+        }
+        break;
+      case 'lost': {
+        // Our connection is gone. The relay keeps our place: until we are
+        // back we stand still, and what we carried goes home (the others'
+        // games see to that on their side).
+        this.offline = { until: performance.now() + (m.wait || REJOIN_MS) };
+        for (const r of this.rivals.values()) { r.vx = 0; r.vy = 0; }
+        this.carry = -1;
+        const p = game.player;
+        if (p.board) { p.loseBoard(game); this.boardTime = 0; }
+        game.audio.play('denied');
+        break;
+      }
+      case 'rejoined': {
+        // Back in our place, with what we had. Anything we had asked the
+        // host for went unanswered: ask again by touching it.
+        this.offline = null;
+        for (const k of this.byId.values()) k.pending = false;
+        const p = game.player;
+        if (!p.dead) p.invuln = Math.max(p.invuln, RESPAWN_SAFE);
+        game.banner(tr('BACK IN THE GAME!'), 80);
+        game.audio.play('secret');
+        break;
+      }
+      case 'away': {
+        // Someone's connection dropped: they are out of the fight until
+        // they are back (or the relay gives up on them, and says they left).
+        const r = this.rivals.get(m.id);
+        if (!r) break;
+        const board = this.byId.get('board');
+        // The host puts down the airboard they were riding, for everyone.
+        if (this.host && !m.late && r.anim === 'airboard' && board && board.taken) this.dropBoard(game, r.cx, r.y + r.h);
+        if (r.carry >= 0) this.say(tr('THE {0} FLAG WENT HOME', tr(TEAMS[r.carry].name)));
+        Object.assign(r, { away: true, vx: 0, vy: 0, carry: -1 });
+        this.say(tr(m.idle ? '{0} STEPPED AWAY' : '{0} LOST CONNECTION', r.name));
+        break;
+      }
+      case 'returned': {
+        const r = this.rivals.get(m.id);
+        if (r) { r.away = false; this.say(tr('{0} IS BACK', r.name)); }
+        break;
+      }
+      case 'left': {
+        const r = this.rivals.get(m.id);
+        if (r) { this.say(tr('{0} LEFT', r.name)); this.rivals.delete(m.id); }
+        if (m.closed || !this.rivals.size) this.result = this.result || { left: true };
+        break;
+      }
+      default: break;
+    }
+  }
+}
