@@ -120,18 +120,18 @@ instead, or `party.bat` to host a network game.
 
 ### Game data
 
-This repository contains the Jazzo engine. It does **not** contain the art,
-sounds, music or levels of Jazz Jackrabbit 2, which belong to Epic Games, and
-the game needs them to run. Supply them from your own copy of the game:
+The repository includes the data the game runs on, so it plays straight after
+cloning:
 
-| Folder | What goes in it |
+| Folder | What is in it |
 | --- | --- |
-| `assets/` | Sprite sheets, tile sets, fonts and sound samples. The atlas `.json` files are here; `tools/j2a.py`, `tools/build_sprites.py`, `tools/build_font.py` and `tools/build_blocks.py` cut the images and sounds. |
-| `Levels/` | Level packs: folders or `.zip` files holding `.j2l` levels and their `.j2t` tile sets. |
+| `assets/` | Sprite sheets, tile sets, fonts and sound samples, with their atlas `.json` files. `tools/j2a.py`, `tools/build_sprites.py`, `tools/build_font.py` and `tools/build_blocks.py` are the scripts that cut them. |
+| `Levels/` | Level packs: folders and `.zip` files holding `.j2l` levels and their `.j2t` tile sets. Drop another pack in and it appears in the episode select. |
 | `Soundtracks/` | Recorded music tracks. |
 
-The Android launcher icon is left out for the same reason: add your own before
-building the app.
+The Jazz Jackrabbit 2 art, sounds, music, films and levels among these files
+belong to Epic Games, and the community level packs belong to their authors.
+None of that material is covered by Jazzo's license (see [License](#license)).
 
 ## Documentation
 
@@ -145,6 +145,9 @@ project layout.
 index.html, style.css   the page
 src/                    the game engine (JavaScript modules)
 src/jj2/                readers for the original game's level, tile set and script files
+assets/                 sprite sheets, tile sets, fonts and sounds
+Levels/                 level packs
+Soundtracks/            recorded music
 android/                the Android app and its party server
 serve.py                web server and party relay
 tools/                  asset cutters and level checkers
@@ -165,5 +168,6 @@ docs/                   the manual
 
 Jazzo's own code is released under the [MIT License](LICENSE). The bundled
 libraries in `vendor/` keep their own licenses. Jazz Jackrabbit 2 and its
-characters, art, sounds, music and levels are the property of Epic Games and
-are not covered by this license.
+characters, art, sounds, music, films and levels are the property of Epic
+Games, and the community level packs in `Levels/` belong to their authors;
+those files are in the repository but are not covered by this license.
