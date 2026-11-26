@@ -15,6 +15,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/h1zn/Jazzo/releases/download/rea/Jazzo-1.7.1.apk">
+    <img alt="Download the Android APK" src="https://img.shields.io/badge/Download-Android%20APK-3ddc84?style=for-the-badge&logo=android&logoColor=white">
+  </a>
+</p>
+
+<p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
   <a href="#android">Android</a> ·
@@ -64,6 +70,11 @@ python3 serve.py 8870
 ```
 
 Then open <http://localhost:8870/>.
+
+### Android
+
+[Download the APK](https://github.com/h1zn/Jazzo/releases/download/rea/Jazzo-1.7.1.apk)
+on your phone or tablet and install it. See [Android](#android) for the steps.
 
 ### Requirements
 
@@ -132,6 +143,18 @@ the full game on board and sharp graphics on any screen:
 - **Touch controls** with a floating stick, plus gamepad and keyboard support.
 - **Hosts network games itself**: the phone runs the party server and keeps
   hosting when the app is in the background.
+
+### Download
+
+**[Download Jazzo-1.7.1.apk](https://github.com/h1zn/Jazzo/releases/download/rea/Jazzo-1.7.1.apk)** (121 MB),
+or pick a version from the [Releases page](https://github.com/h1zn/Jazzo/releases).
+
+1. Open the link on your phone or tablet and download the file.
+2. Open the downloaded APK. Jazzo is not from the Play Store, so Android asks
+   you to allow installs from your browser or file manager: allow it.
+3. Tap **Install**, then open **Jazzo**.
+
+### Build it yourself
 
 The APK is built from the `android/` folder with JDK 17 and the Android SDK:
 
