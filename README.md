@@ -29,6 +29,13 @@
   <img src="Game1.png" alt="Jazzo gameplay in the castle level" width="49%">
 </p>
 
+<p align="center">
+  <a href="docs/media/jazzo-demo.mp4">
+    <img src="docs/media/jazzo-demo.gif" alt="Jazzo gameplay preview" width="60%">
+  </a><br>
+  <sub>A short preview. <a href="docs/media/jazzo-demo.mp4">Watch the full gameplay video</a> (80 seconds).</sub>
+</p>
+
 ## Quick start
 
 ### Windows
